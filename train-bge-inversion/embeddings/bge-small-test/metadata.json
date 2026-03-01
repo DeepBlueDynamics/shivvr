@@ -1,0 +1,11 @@
+{
+  "dataset": "mteb/msmarco:corpus",
+  "embedding_dim": 384,
+  "embeddings_path": "embeddings\\bge-small-test\\embeddings.npy",
+  "max_length": 256,
+  "model_name": "BAAI/bge-small-en-v1.5",
+  "num_allocated": 10000,
+  "num_samples": 10000,
+  "skipped_empty": 0,
+  "texts_path": "embeddings\\bge-small-test\\texts.txt"
+}

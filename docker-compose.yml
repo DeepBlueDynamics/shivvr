@@ -1,0 +1,21 @@
+services:
+  shivvr:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - MODEL_PATH=/models/bge-small-en-v1.5.onnx
+      - TOKENIZER_PATH=/models/tokenizer.json
+      - DATA_PATH=/data/shivvr
+    volumes:
+      - shivvr-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  shivvr-data:
