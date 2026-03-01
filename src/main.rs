@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let model_path = std::env::var("MODEL_PATH")
-        .unwrap_or_else(|_| "models/bge-small-en-v1.5.onnx".to_string());
+        .unwrap_or_else(|_| "models/gtr-t5-base.onnx".to_string());
     let tokenizer_path = std::env::var("TOKENIZER_PATH")
         .unwrap_or_else(|_| "models/tokenizer.json".to_string());
     let data_path = std::env::var("DATA_PATH").unwrap_or_else(|_| "/data/shivvr".to_string());
@@ -91,6 +91,11 @@ async fn main() -> anyhow::Result<()> {
     let app = api::router(state);
 
     let addr = format!("0.0.0.0:{}", port);
+    if cfg!(feature = "cuda") {
+        println!("GPU: CUDA execution provider enabled");
+    } else {
+        println!("GPU: none (CPU only)");
+    }
     println!("Starting shivvr on {}", addr);
 
     let listener = TcpListener::bind(&addr).await?;

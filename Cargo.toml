@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = ["ml"]
 ml = ["ort", "tokenizers", "simsimd"]
+cuda = ["ort/cuda"]
 
 [dependencies]
 # Async runtime

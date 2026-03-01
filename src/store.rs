@@ -8,7 +8,7 @@ use sled::Db;
 pub struct Chunk {
     pub id: String,
     pub text: String,
-    /// Organize embedding (384d, bge-small)
+    /// Organize embedding (768d, gtr-t5-base)
     pub embedding: Vec<f32>,
     /// Retrieve embedding (1536d, ada-002) — optional
     #[serde(default)]

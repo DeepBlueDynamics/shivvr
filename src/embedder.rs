@@ -9,14 +9,30 @@ use std::sync::Mutex;
 pub struct Embedder {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
+    /// True if the ONNX model accepts token_type_ids (BERT-based models only)
+    has_token_type_ids: bool,
 }
 
 impl Embedder {
     pub fn new(model_path: &str, tokenizer_path: &str) -> Result<Self> {
-        let session = Session::builder()?
+        let mut builder = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
-            .commit_from_file(model_path)?;
+            .with_intra_threads(4)?;
+
+        #[cfg(feature = "cuda")]
+        {
+            use ort::ep::CUDA;
+            builder = builder.with_execution_providers([CUDA::default().build()])?;
+            println!("CUDA execution provider registered");
+        }
+
+        let session = builder.commit_from_file(model_path)?;
+
+        // Check if model accepts token_type_ids (BERT-based yes, T5-based no)
+        let has_token_type_ids = session
+            .inputs
+            .iter()
+            .any(|i| i.name == "token_type_ids");
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
@@ -24,6 +40,7 @@ impl Embedder {
         Ok(Self {
             session: Mutex::new(session),
             tokenizer,
+            has_token_type_ids,
         })
     }
 
@@ -40,26 +57,33 @@ impl Embedder {
 
         let input_ids: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
         let attention: Vec<i64> = attention_mask.iter().map(|&x| x as i64).collect();
-        let token_type_ids: Vec<i64> = vec![0i64; seq_len];
 
         let input_ids = Array2::from_shape_vec((1, seq_len), input_ids)?;
         let attention_mask = Array2::from_shape_vec((1, seq_len), attention)?;
-        let token_type_ids = Array2::from_shape_vec((1, seq_len), token_type_ids)?;
 
         let input_ids = Value::from_array(input_ids)?;
         let attention_mask = Value::from_array(attention_mask)?;
-        let token_type_ids = Value::from_array(token_type_ids)?;
 
         let mut session = self
             .session
             .lock()
             .map_err(|_| anyhow::anyhow!("Session lock poisoned"))?;
 
-        let outputs = session.run(ort::inputs![
-            "input_ids" => input_ids,
-            "attention_mask" => attention_mask,
-            "token_type_ids" => token_type_ids,
-        ])?;
+        let outputs = if self.has_token_type_ids {
+            let token_type_ids: Vec<i64> = vec![0i64; seq_len];
+            let token_type_ids = Array2::from_shape_vec((1, seq_len), token_type_ids)?;
+            let token_type_ids = Value::from_array(token_type_ids)?;
+            session.run(ort::inputs![
+                "input_ids" => input_ids,
+                "attention_mask" => attention_mask,
+                "token_type_ids" => token_type_ids,
+            ])?
+        } else {
+            session.run(ort::inputs![
+                "input_ids" => input_ids,
+                "attention_mask" => attention_mask,
+            ])?
+        };
 
         let output = outputs
             .get("last_hidden_state")

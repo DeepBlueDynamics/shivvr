@@ -1,6 +1,6 @@
-FROM debian:trixie-slim AS builder
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS builder
 
-# Install build deps + Rust (need glibc 2.38+ for ort/ONNX Runtime)
+# Install build deps + Rust
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev curl g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -11,29 +11,24 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /app
 COPY Cargo.toml ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release || true
+RUN cargo build --release --features cuda || true
 RUN rm -rf src
 
 COPY src ./src
 RUN touch src/main.rs
-RUN cargo build --release
+RUN cargo build --release --features cuda
 
-# Download BGE-small model and tokenizer
-RUN mkdir -p /models && \
-    curl -L -o /models/bge-small-en-v1.5.onnx \
-    "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx" && \
-    curl -L -o /models/tokenizer.json \
-    "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json"
+# Embedder + inverter ONNX models (pre-exported via scripts/export_gtr_models.py)
+# Run: python scripts/export_gtr_models.py --output_dir models/
+# This produces gtr-t5-base.onnx, tokenizer.json, and inverter/ directory
+COPY models/gtr-t5-base.onnx /models/gtr-t5-base.onnx
+COPY models/tokenizer.json /models/tokenizer.json
+COPY models/inverter/projection.onnx /models/inverter/projection.onnx
+COPY models/inverter/encoder.onnx /models/inverter/encoder.onnx
+COPY models/inverter/decoder.onnx /models/inverter/decoder.onnx
+COPY models/inverter/tokenizer.json /models/inverter/tokenizer.json
 
-# Vec2text inverter models are COPY'd from pre-exported local directory
-# (requires running scripts/export_onnx_full.py first)
-# Uncomment when ONNX exports are available:
-# COPY onnx-export/hypothesis/projection.onnx /models/inverter/projection.onnx
-# COPY onnx-export/hypothesis/t5-onnx/encoder.onnx /models/inverter/encoder.onnx
-# COPY onnx-export/hypothesis/t5-onnx/decoder.onnx /models/inverter/decoder.onnx
-# COPY onnx-export/hypothesis/t5-onnx/tokenizer.json /models/inverter/tokenizer.json
-
-FROM debian:trixie-slim
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
 RUN apt-get update && apt-get install -y \
     ca-certificates curl \
@@ -43,9 +38,11 @@ COPY --from=builder /app/target/release/shivvr /shivvr
 COPY --from=builder /models /models
 
 ENV PORT=8080
-ENV MODEL_PATH=/models/bge-small-en-v1.5.onnx
+ENV MODEL_PATH=/models/gtr-t5-base.onnx
 ENV TOKENIZER_PATH=/models/tokenizer.json
 ENV DATA_PATH=/data/shivvr
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Phase 1: OpenAI — set at runtime for ada-002 retrieve embeddings
 # ENV OPENAI_API_KEY=

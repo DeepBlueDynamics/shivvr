@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 /// Per-agent orthogonal encryption keys
 pub struct AgentKeys {
     pub agent_id: String,
-    /// Orthogonal matrix for organize embeddings (384×384)
+    /// Orthogonal matrix for organize embeddings (768×768)
     organize: Array2<f32>,
     /// Transpose of organize matrix (cached for decryption)
     organize_t: Array2<f32>,

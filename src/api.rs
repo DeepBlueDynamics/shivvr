@@ -74,7 +74,7 @@ pub struct SearchQuery {
     pub include_nearby: Option<bool>,
     #[serde(default = "default_time_window")]
     pub time_window_minutes: i64,
-    /// Embedding role: "organize" (384d bge-small) or "retrieve" (1536d ada-002)
+    /// Embedding role: "organize" (768d gtr-t5-base) or "retrieve" (1536d ada-002)
     #[serde(default = "default_role")]
     pub role: String,
     /// Agent ID for encrypted search
@@ -168,6 +168,7 @@ pub struct HealthResponse {
     pub uptime_seconds: u64,
     pub encryption_available: bool,
     pub inversion_available: bool,
+    pub gpu: bool,
 }
 
 #[derive(Serialize)]
@@ -280,7 +281,7 @@ pub async fn search(
 
     // Embed query with the appropriate model for the role
     let mut query_embedding = if role == "retrieve" {
-        // Try ada-002 first for retrieve role, fall back to bge-small
+        // Try ada-002 first for retrieve role, fall back to gtr-base
         if let Some(ref openai) = state.openai_embedder {
             openai.embed(&query.q).await.map_err(|e| {
                 (
@@ -478,9 +479,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     let total_chunks = state.store.total_chunks().unwrap_or(0);
 
     let mut models = vec![ModelInfo {
-        name: "bge-small-en-v1.5".to_string(),
+        name: "gtr-t5-base".to_string(),
         role: "organize".to_string(),
-        dimension: 384,
+        dimension: 768,
         status: "active".to_string(),
     }];
 
@@ -501,6 +502,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         uptime_seconds: state.start_time.elapsed().as_secs(),
         encryption_available: true,
         inversion_available: state.inverter.is_some(),
+        gpu: cfg!(feature = "cuda"),
     })
 }
 

@@ -6,10 +6,10 @@ use ort::value::Value;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
-/// Vec2text inverter: 384d embedding → text via T5 ONNX pipeline
+/// Vec2text inverter: embedding → text via T5 ONNX pipeline
 ///
 /// Pipeline:
-///   1. embedding (384d) → projection ONNX → (1, 16, 768) encoder input
+///   1. embedding → projection ONNX → (1, N, 768) encoder input
 ///   2. T5 encoder ONNX → encoder hidden states
 ///   3. T5 decoder ONNX → greedy autoregressive decoding → token IDs → text
 pub struct Inverter {
@@ -17,6 +17,8 @@ pub struct Inverter {
     encoder: Mutex<Session>,
     decoder: Mutex<Session>,
     tokenizer: Tokenizer,
+    /// Expected embedding dimension (detected from projection model)
+    embedding_dim: usize,
     /// Maximum tokens to generate
     max_length: usize,
     /// T5 decoder start token (pad_token_id = 0 for T5)
@@ -26,58 +28,76 @@ pub struct Inverter {
 }
 
 impl Inverter {
+    fn build_session(model_path: &str) -> Result<Session> {
+        let mut builder = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(2)?;
+
+        #[cfg(feature = "cuda")]
+        {
+            use ort::ep::CUDA;
+            builder = builder.with_execution_providers([CUDA::default().build()])?;
+        }
+
+        Ok(builder.commit_from_file(model_path)?)
+    }
+
     /// Load all ONNX models and tokenizer
     ///
     /// Expected paths:
-    ///   - projection_path: projection.onnx (384 → 768, repeat 16x)
-    ///   - encoder_path: t5-onnx/encoder.onnx
-    ///   - decoder_path: t5-onnx/decoder.onnx
-    ///   - tokenizer_path: t5-onnx/tokenizer.json
+    ///   - projection_path: projection.onnx (Nd → 16x768)
+    ///   - encoder_path: encoder.onnx (inputs_embeds interface)
+    ///   - decoder_path: decoder.onnx
+    ///   - tokenizer_path: tokenizer.json (T5 tokenizer)
     pub fn new(
         projection_path: &str,
         encoder_path: &str,
         decoder_path: &str,
         tokenizer_path: &str,
     ) -> Result<Self> {
-        let projection = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?
-            .commit_from_file(projection_path)?;
+        let projection = Self::build_session(projection_path)?;
 
-        let encoder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?
-            .commit_from_file(encoder_path)?;
+        // Detect embedding dimension from the projection model's input shape
+        let embedding_dim = projection
+            .inputs
+            .first()
+            .and_then(|i| i.input_type.tensor_type())
+            .and_then(|t| t.dimensions.get(1).copied())
+            .flatten()
+            .map(|d| d as usize)
+            .unwrap_or(768); // default to 768 (gtr-base)
 
-        let decoder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?
-            .commit_from_file(decoder_path)?;
+        let encoder = Self::build_session(encoder_path)?;
+        let decoder = Self::build_session(decoder_path)?;
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load T5 tokenizer: {}", e))?;
+
+        println!("Vec2text inverter: {}d embeddings", embedding_dim);
 
         Ok(Self {
             projection: Mutex::new(projection),
             encoder: Mutex::new(encoder),
             decoder: Mutex::new(decoder),
             tokenizer,
+            embedding_dim,
             max_length: 64,
             decoder_start_token_id: 0, // T5 pad token
             eos_token_id: 1,           // T5 EOS token
         })
     }
 
-    /// Invert a 384d embedding back to text
+    /// Invert an embedding back to text
     pub fn invert(&self, embedding: &[f32]) -> Result<String> {
-        if embedding.len() != 384 {
+        if embedding.len() != self.embedding_dim {
             bail!(
-                "Expected 384d embedding for inversion, got {}d",
+                "Expected {}d embedding for inversion, got {}d",
+                self.embedding_dim,
                 embedding.len()
             );
         }
 
-        // Step 1: Project 384d → (1, 16, 768) via projection.onnx
+        // Step 1: Project embedding → (1, N, 768) via projection.onnx
         let projected = self.project(embedding)?;
 
         // Step 2: Encode projected input via T5 encoder
@@ -95,9 +115,9 @@ impl Inverter {
         Ok(text.trim().to_string())
     }
 
-    /// Run projection ONNX: (384,) → (1, 16, 768)
+    /// Run projection ONNX: (N,) → (1, seq, 768)
     fn project(&self, embedding: &[f32]) -> Result<Array3<f32>> {
-        let input = Array2::from_shape_vec((1, 384), embedding.to_vec())?;
+        let input = Array2::from_shape_vec((1, self.embedding_dim), embedding.to_vec())?;
         let input_value = Value::from_array(input)?;
 
         let mut session = self
