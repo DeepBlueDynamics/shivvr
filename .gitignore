@@ -3,8 +3,6 @@
 .venv/
 *.pyc
 __pycache__/
-vectors-might/cache/
-vector-smite/cache/
 tmp_trainer/
 *.onnx
 *.tar.gz
@@ -18,3 +16,6 @@ test.py
 hn_frontpage.md
 title-test-results-*.json
 *_versions/
+vectors-might/
+vector-smite/
+train-bge-inversion/
