@@ -59,11 +59,11 @@ impl Inverter {
 
         // Detect embedding dimension from the projection model's input shape
         let embedding_dim = projection
-            .inputs
+            .inputs()
             .first()
-            .and_then(|i| i.input_type.tensor_type())
-            .and_then(|t| t.dimensions.get(1).copied())
-            .flatten()
+            .and_then(|i| i.dtype().tensor_shape())
+            .and_then(|s| s.get(1).copied())
+            .filter(|&d| d > 0)
             .map(|d| d as usize)
             .unwrap_or(768); // default to 768 (gtr-base)
 

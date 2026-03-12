@@ -30,9 +30,9 @@ impl Embedder {
 
         // Check if model accepts token_type_ids (BERT-based yes, T5-based no)
         let has_token_type_ids = session
-            .inputs
+            .inputs()
             .iter()
-            .any(|i| i.name == "token_type_ids");
+            .any(|i| i.name() == "token_type_ids");
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;

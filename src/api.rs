@@ -7,7 +7,7 @@ use crate::store::Store;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Json,
+    response::{Html, Json},
     routing::{delete, get, post},
     Router,
 };
@@ -676,10 +676,173 @@ pub async fn invert(
     }))
 }
 
+// ===== Homepage =====
+
+pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
+    let sessions = state.store.list_sessions().unwrap_or_default().len();
+    let chunks = state.store.total_chunks().unwrap_or(0);
+    let uptime = state.start_time.elapsed().as_secs();
+    let gpu = if cfg!(feature = "cuda") { "CUDA" } else { "CPU" };
+    let inversion = if state.inverter.is_some() { "enabled" } else { "disabled" };
+
+    Html(format!(r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shivvr</title>
+<style>
+  :root {{ --bg: #0a0a0f; --fg: #c8c8d0; --accent: #7b68ee; --dim: #555568;
+           --card: #12121a; --border: #1e1e2e; --green: #50fa7b; }}
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ background: var(--bg); color: var(--fg); font-family: 'SF Mono', 'Fira Code', monospace;
+          line-height: 1.7; padding: 2rem; max-width: 860px; margin: 0 auto; }}
+  h1 {{ color: var(--accent); font-size: 2.4rem; letter-spacing: -0.02em; margin-bottom: 0.25rem; }}
+  h1 span {{ color: var(--dim); font-weight: 300; font-size: 0.5em; }}
+  .tagline {{ color: var(--dim); font-size: 1rem; margin-bottom: 2.5rem; }}
+  h2 {{ color: var(--accent); font-size: 1.1rem; margin: 2rem 0 0.75rem; letter-spacing: 0.05em;
+        text-transform: uppercase; }}
+  .stats {{ display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 2rem; }}
+  .stat {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+           padding: 1rem 1.25rem; min-width: 140px; }}
+  .stat .val {{ font-size: 1.5rem; color: var(--green); font-weight: 700; }}
+  .stat .lbl {{ font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }}
+  .features {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+               gap: 1rem; margin-bottom: 1.5rem; }}
+  .feature {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+              padding: 1rem 1.25rem; }}
+  .feature b {{ color: var(--accent); }}
+  .feature p {{ color: var(--dim); font-size: 0.85rem; margin-top: 0.25rem; }}
+  pre {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+         padding: 1rem 1.25rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }}
+  code {{ color: var(--fg); }}
+  .comment {{ color: var(--dim); }}
+  table {{ width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 0.85rem; }}
+  th, td {{ text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }}
+  th {{ color: var(--accent); font-weight: 600; font-size: 0.75rem; text-transform: uppercase;
+       letter-spacing: 0.08em; }}
+  td code {{ color: var(--green); }}
+  a {{ color: var(--accent); text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  .links {{ display: flex; gap: 1rem; margin-top: 2.5rem; margin-bottom: 1rem; }}
+  .links a {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+              padding: 0.6rem 1.25rem; font-size: 0.85rem; transition: border-color 0.2s; }}
+  .links a:hover {{ border-color: var(--accent); text-decoration: none; }}
+  .footer {{ color: var(--dim); font-size: 0.75rem; margin-top: 3rem; padding-top: 1.5rem;
+             border-top: 1px solid var(--border); }}
+</style>
+</head>
+<body>
+
+<h1>shivvr <span>v0.1</span></h1>
+<p class="tagline">Semantic memory service. You throw text at it. It figures out the rest.</p>
+
+<div class="stats">
+  <div class="stat"><div class="val">{sessions}</div><div class="lbl">Sessions</div></div>
+  <div class="stat"><div class="val">{chunks}</div><div class="lbl">Chunks</div></div>
+  <div class="stat"><div class="val">{uptime}s</div><div class="lbl">Uptime</div></div>
+  <div class="stat"><div class="val">{gpu}</div><div class="lbl">Compute</div></div>
+</div>
+
+<h2>What it does</h2>
+<div class="features">
+  <div class="feature"><b>Ingest</b><p>Chunks text by sentence boundaries, embeds each chunk with GTR-T5-base (768d), stores in sled.</p></div>
+  <div class="feature"><b>Search</b><p>Cosine similarity over embeddings with optional time-weighting and temporal context expansion.</p></div>
+  <div class="feature"><b>Crypto</b><p>Per-agent orthogonal matrix encryption on embeddings. Your vectors, your keys.</p></div>
+  <div class="feature"><b>Inversion</b><p>Vec2text: reconstruct approximate text from embedding vectors. T5-based, currently {inversion}.</p></div>
+</div>
+
+<h2>API</h2>
+<table>
+  <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+  <tr><td>GET</td><td><code>/health</code></td><td>Status, models, session/chunk counts</td></tr>
+  <tr><td>GET</td><td><code>/memory</code></td><td>List all sessions</td></tr>
+  <tr><td>POST</td><td><code>/memory/:session/ingest</code></td><td>Ingest text (auto-chunk + embed)</td></tr>
+  <tr><td>GET</td><td><code>/memory/:session/search?q=...</code></td><td>Semantic search</td></tr>
+  <tr><td>GET</td><td><code>/memory/:session/info</code></td><td>Session metadata</td></tr>
+  <tr><td>DELETE</td><td><code>/memory/:session</code></td><td>Delete a session</td></tr>
+  <tr><td>POST</td><td><code>/agent/:id/register</code></td><td>Register encryption keys</td></tr>
+  <tr><td>POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
+  <tr><td>POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
+  <tr><td>POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding</td></tr>
+</table>
+
+<h2>Quick start</h2>
+<pre><code><span class="comment"># Clone and run with Docker Compose</span>
+git clone git@github.com:DeepBlueDynamics/shivvr.git
+cd shivvr
+docker compose up -d
+
+<span class="comment"># Ingest some text</span>
+curl -X POST http://localhost:8080/memory/my-session/ingest \
+  -H "Content-Type: application/json" \
+  -d '{{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts."}}'
+
+<span class="comment"># Search it</span>
+curl "http://localhost:8080/memory/my-session/search?q=morning+at+the+marina&amp;n=5"</code></pre>
+
+<h2>Deploy on Docker</h2>
+<pre><code><span class="comment"># CPU only (no NVIDIA GPU required)</span>
+docker compose up -d
+
+<span class="comment"># With GPU (requires nvidia-container-toolkit)</span>
+docker compose up -d    <span class="comment"># compose.yml reserves 1 GPU by default</span>
+
+<span class="comment"># Data persists in the shivvr-data volume</span>
+docker volume inspect shivvr-data</code></pre>
+
+<h2>Deploy on Cloud Run (GCP)</h2>
+<pre><code><span class="comment"># Build, push, and deploy with L4 GPU</span>
+docker compose build
+docker tag gnosis-chunk-shivvr gcr.io/YOUR_PROJECT/shivvr:latest
+docker push gcr.io/YOUR_PROJECT/shivvr:latest
+
+gcloud run deploy shivvr \
+  --image gcr.io/YOUR_PROJECT/shivvr:latest \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --memory 16Gi --cpu 4 \
+  --gpu 1 --gpu-type nvidia-l4 \
+  --max-instances 1 \
+  --port 8080</code></pre>
+
+<h2>Environment</h2>
+<table>
+  <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
+  <tr><td><code>DATA_PATH</code></td><td>/data/shivvr</td><td>sled database directory</td></tr>
+  <tr><td><code>MODEL_PATH</code></td><td>/models/gtr-t5-base.onnx</td><td>Embedding model</td></tr>
+  <tr><td><code>TOKENIZER_PATH</code></td><td>/models/tokenizer.json</td><td>Tokenizer</td></tr>
+  <tr><td><code>OPENAI_API_KEY</code></td><td>&mdash;</td><td>Enables ada-002 retrieve embeddings</td></tr>
+</table>
+
+<h2>Stack</h2>
+<table>
+  <tr><th>Layer</th><th>Choice</th></tr>
+  <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
+  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime</td></tr>
+  <tr><td>Vector ops</td><td>simsimd (SIMD-accelerated cosine)</td></tr>
+  <tr><td>Storage</td><td>sled (embedded, ACID, persistent)</td></tr>
+  <tr><td>GPU</td><td>CUDA 12.6 via ort EP (optional)</td></tr>
+</table>
+
+<div class="links">
+  <a href="https://github.com/DeepBlueDynamics/shivvr">GitHub</a>
+  <a href="/health">Health Check</a>
+  <a href="/memory">Sessions</a>
+</div>
+
+<div class="footer">shivvr &middot; Rust + ONNX + sled &middot; DeepBlueDynamics</div>
+
+</body>
+</html>"##))
+}
+
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(homepage))
         .route("/health", get(health))
         .route("/memory", get(list_sessions))
         .route("/memory/:session_id/ingest", post(ingest))

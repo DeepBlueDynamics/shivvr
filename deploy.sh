@@ -6,17 +6,18 @@ REGION="us-central1"
 SERVICE="shivvr"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}"
 
-echo "Building ${IMAGE}..."
-gcloud builds submit --tag "${IMAGE}" --project "${PROJECT_ID}" --timeout=1800
+echo "Tagging and pushing local image to ${IMAGE}..."
+docker tag gnosis-chunk-shivvr "${IMAGE}:latest"
+docker push "${IMAGE}:latest"
 
 echo "Deploying ${SERVICE} to Cloud Run with L4 GPU..."
 gcloud run deploy "${SERVICE}" \
-  --image "${IMAGE}" \
+  --image "${IMAGE}:latest" \
   --region "${REGION}" \
   --project "${PROJECT_ID}" \
   --platform managed \
   --allow-unauthenticated \
-  --memory 8Gi \
+  --memory 16Gi \
   --cpu 4 \
   --gpu 1 \
   --gpu-type nvidia-l4 \
@@ -27,4 +28,5 @@ gcloud run deploy "${SERVICE}" \
   --port 8080 \
   --set-env-vars "DATA_PATH=/data/shivvr"
 
-echo "Deployed: https://${SERVICE}-$(gcloud run services describe ${SERVICE} --region ${REGION} --project ${PROJECT_ID} --format 'value(status.url)' 2>/dev/null | sed 's|https://||')"
+echo "Service URL:"
+gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format="value(status.url)"
