@@ -1,0 +1,13 @@
+.venv/
+embeddings/
+models/
+saves/
+saves-test/
+cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.onnx
+*.npy
+*.pt
+*.bin

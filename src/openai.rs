@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 pub struct OpenAIEmbedder {
     client: reqwest::Client,
     api_key: String,
+    model: String,
 }
 
 #[derive(Serialize)]
 struct EmbeddingRequest {
-    model: &'static str,
+    model: String,
     input: Vec<String>,
 }
 
@@ -27,8 +28,14 @@ impl OpenAIEmbedder {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
+        let model = std::env::var("OPENAI_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "text-embedding-3-small".to_string());
 
-        Ok(Self { client, api_key })
+        Ok(Self {
+            client,
+            api_key,
+            model,
+        })
     }
 
     /// Embed a single text, returns L2-normalized 1536d vector
@@ -46,7 +53,7 @@ impl OpenAIEmbedder {
         }
 
         let request = EmbeddingRequest {
-            model: "text-embedding-ada-002",
+            model: self.model.clone(),
             input: texts.to_vec(),
         };
 

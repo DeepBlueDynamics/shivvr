@@ -88,7 +88,7 @@ impl Inverter {
     }
 
     /// Invert an embedding back to text
-    pub fn invert(&self, embedding: &[f32]) -> Result<String> {
+    pub fn invert(&self, embedding: &[f32], max_length: usize) -> Result<String> {
         if embedding.len() != self.embedding_dim {
             bail!(
                 "Expected {}d embedding for inversion, got {}d",
@@ -104,7 +104,7 @@ impl Inverter {
         let encoder_output = self.encode(&projected)?;
 
         // Step 3: Greedy decode from encoder output
-        let token_ids = self.greedy_decode(&encoder_output)?;
+        let token_ids = self.greedy_decode(&encoder_output, max_length)?;
 
         // Step 4: Decode token IDs to text
         let text = self
@@ -173,13 +173,13 @@ impl Inverter {
     }
 
     /// Greedy autoregressive decoding
-    fn greedy_decode(&self, encoder_output: &Array3<f32>) -> Result<Vec<u32>> {
+    fn greedy_decode(&self, encoder_output: &Array3<f32>, max_length: usize) -> Result<Vec<u32>> {
         let seq_len = encoder_output.shape()[1];
         let encoder_attention_mask = Array2::from_elem((1, seq_len), 1i64);
 
         let mut generated = vec![self.decoder_start_token_id];
 
-        for _ in 0..self.max_length {
+        for _ in 0..max_length {
             let decoder_input =
                 Array2::from_shape_vec((1, generated.len()), generated.clone())?;
 

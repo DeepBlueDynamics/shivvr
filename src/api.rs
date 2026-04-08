@@ -3,11 +3,14 @@ use crate::crypto::CryptoManager;
 use crate::embedder::Embedder;
 use crate::inverter::Inverter;
 use crate::openai::OpenAIEmbedder;
+use crate::auth::NutsAuth;
 use crate::store::Store;
+use crate::temp_store::TempStore;
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::{Html, Json},
+    extract::{Path, Query, Request, State},
+    http::{Method, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
 };
@@ -17,12 +20,15 @@ use std::sync::Arc;
 
 pub struct AppState {
     pub store: Arc<Store>,
+    pub temp_store: Arc<TempStore>,
     pub chunker: Arc<Chunker>,
     pub embedder: Arc<Embedder>,
     pub openai_embedder: Option<Arc<OpenAIEmbedder>>,
     pub crypto: Arc<CryptoManager>,
     pub inverter: Option<Arc<Inverter>>,
     pub start_time: std::time::Instant,
+    pub nuts_auth: Option<Arc<NutsAuth>>,
+    pub openai_auth_required: bool,
 }
 
 // ===== Request/Response Types =====
@@ -70,6 +76,10 @@ pub struct SearchQuery {
     pub n: usize,
     #[serde(default)]
     pub time_weight: Option<f32>,
+    /// Half-life for temporal decay in hours (default 168 = one week).
+    /// Only used when time_weight > 0. Smaller values favour recent chunks more aggressively.
+    #[serde(default = "default_decay_halflife")]
+    pub decay_halflife_hours: f32,
     #[serde(default)]
     pub include_nearby: Option<bool>,
     #[serde(default = "default_time_window")]
@@ -87,8 +97,14 @@ fn default_n() -> usize {
 fn default_time_window() -> i64 {
     30
 }
+fn default_decay_halflife() -> f32 {
+    168.0
+}
 fn default_role() -> String {
     "organize".to_string()
+}
+fn default_max_length() -> usize {
+    64
 }
 
 #[derive(Serialize)]
@@ -149,6 +165,24 @@ pub struct SessionListItem {
     pub id: String,
     pub chunks: usize,
     pub last_active: String,
+}
+
+#[derive(Serialize)]
+pub struct TempStoreListResponse {
+    pub stores: Vec<TempStoreListItem>,
+}
+
+#[derive(Serialize)]
+pub struct TempStoreListItem {
+    pub name: String,
+    pub chunks: usize,
+    pub expires_at: String,
+}
+
+#[derive(Serialize)]
+pub struct TempDumpResponse {
+    pub name: String,
+    pub chunks: Vec<crate::store::Chunk>,
 }
 
 #[derive(Serialize)]
@@ -271,6 +305,96 @@ pub async fn ingest(
     }))
 }
 
+pub async fn temp_ingest(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<IngestRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let start = std::time::Instant::now();
+
+    let emotion_primary = req.emotion_primary.clone();
+    let emotion_secondary = req.emotion_secondary.clone();
+    let agent_id = req.agent_id.clone();
+
+    let mut chunks = state
+        .chunker
+        .chunk(&req.text, req.source, req.metadata)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    if let Some(ref openai) = state.openai_embedder {
+        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+        match openai.embed_batch(&texts).await {
+            Ok(embeddings) => {
+                for (chunk, emb) in chunks.iter_mut().zip(embeddings.into_iter()) {
+                    chunk.embedding_retrieve = Some(emb);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("OpenAI retrieve embedding failed, continuing without: {}", e);
+            }
+        }
+    }
+
+    for chunk in &mut chunks {
+        chunk.emotion_primary = emotion_primary.clone();
+        chunk.emotion_secondary = emotion_secondary.clone();
+        chunk.agent_id = agent_id.clone();
+    }
+
+    if let Some(ref aid) = agent_id {
+        if let Some(keys) = state.crypto.get_keys(aid) {
+            for chunk in &mut chunks {
+                chunk.embedding = keys.encrypt(&chunk.embedding, "organize");
+                if let Some(ref emb) = chunk.embedding_retrieve {
+                    chunk.embedding_retrieve = Some(keys.encrypt(emb, "retrieve"));
+                }
+                chunk.encrypted = true;
+            }
+        }
+    }
+
+    let chunks_created = chunks.len();
+    let tokens_processed: usize = chunks.iter().map(|c| c.token_count).sum();
+
+    let response_chunks: Vec<IngestChunk> = chunks
+        .iter()
+        .map(|c| IngestChunk {
+            chunk_id: c.id.clone(),
+            text: c.text.clone(),
+            embedding: c.embedding.clone(),
+            embedding_retrieve: c.embedding_retrieve.clone(),
+            token_count: c.token_count,
+            source: c.source.clone(),
+            emotion_primary: c.emotion_primary.clone(),
+            emotion_secondary: c.emotion_secondary.clone(),
+        })
+        .collect();
+
+    state.temp_store.add_chunks(&name, chunks).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(IngestResponse {
+        chunks_created,
+        tokens_processed,
+        time_ms: start.elapsed().as_millis() as u64,
+        chunks: response_chunks,
+    }))
+}
+
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -279,28 +403,27 @@ pub async fn search(
     let start = std::time::Instant::now();
     let role = &query.role;
 
+    // Reject retrieve role early if the retrieve embedder is not configured.
+    if role == "retrieve" && state.openai_embedder.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "role=retrieve requires OPENAI embedder configuration".to_string(),
+            }),
+        ));
+    }
+
     // Embed query with the appropriate model for the role
     let mut query_embedding = if role == "retrieve" {
-        // Try ada-002 first for retrieve role, fall back to gtr-base
-        if let Some(ref openai) = state.openai_embedder {
-            openai.embed(&query.q).await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("OpenAI embed failed: {}", e),
-                    }),
-                )
-            })?
-        } else {
-            state.embedder.embed(&query.q).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?
-        }
+        let openai = state.openai_embedder.as_ref().expect("checked above");
+        openai.embed(&query.q).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("OpenAI embed failed: {}", e),
+                }),
+            )
+        })?
     } else {
         state.embedder.embed(&query.q).map_err(|e| {
             (
@@ -365,7 +488,137 @@ pub async fn search(
     } else {
         let results = state
             .store
-            .search(&session_id, &query_embedding, query.n, query.time_weight, role)
+            .search(&session_id, &query_embedding, query.n, query.time_weight, query.decay_halflife_hours, role)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
+
+        results
+            .into_iter()
+            .map(|(chunk, score)| SearchResult {
+                chunk_id: chunk.id,
+                score,
+                text: chunk.text,
+                source: chunk.source,
+                metadata: chunk.metadata,
+                created_at: chunk.created_at.to_rfc3339(),
+                emotion_primary: chunk.emotion_primary,
+                emotion_secondary: chunk.emotion_secondary,
+                nearby_chunks: None,
+            })
+            .collect()
+    };
+
+    Ok(Json(SearchResponse {
+        query: query.q,
+        results,
+        time_ms: start.elapsed().as_millis() as u64,
+    }))
+}
+
+pub async fn temp_search(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let start = std::time::Instant::now();
+    let role = &query.role;
+
+    if role == "retrieve" && state.openai_embedder.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "role=retrieve requires OPENAI embedder configuration".to_string(),
+            }),
+        ));
+    }
+
+    let mut query_embedding = if role == "retrieve" {
+        let openai = state.openai_embedder.as_ref().expect("checked above");
+        openai.embed(&query.q).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("OpenAI embed failed: {}", e),
+                }),
+            )
+        })?
+    } else {
+        state.embedder.embed(&query.q).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+    };
+
+    if let Some(ref aid) = query.agent_id {
+        if let Some(keys) = state.crypto.get_keys(aid) {
+            query_embedding = keys.encrypt(&query_embedding, role);
+        }
+    }
+
+    let results = if query.include_nearby.unwrap_or(false) {
+        let results_with_context = state
+            .temp_store
+            .search_with_temporal_context(
+                &name,
+                &query_embedding,
+                query.n,
+                query.time_window_minutes,
+                role,
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
+
+        results_with_context
+            .into_iter()
+            .map(|(chunk, score, nearby)| SearchResult {
+                chunk_id: chunk.id,
+                score,
+                text: chunk.text,
+                source: chunk.source,
+                metadata: chunk.metadata,
+                created_at: chunk.created_at.to_rfc3339(),
+                emotion_primary: chunk.emotion_primary,
+                emotion_secondary: chunk.emotion_secondary,
+                nearby_chunks: Some(
+                    nearby
+                        .into_iter()
+                        .map(|c| NearbyChunk {
+                            chunk_id: c.id,
+                            text: c.text,
+                            source: c.source,
+                            created_at: c.created_at.to_rfc3339(),
+                        })
+                        .collect(),
+                ),
+            })
+            .collect()
+    } else {
+        let results = state
+            .temp_store
+            .search(
+                &name,
+                &query_embedding,
+                query.n,
+                query.time_weight,
+                query.decay_halflife_hours,
+                role,
+            )
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -472,6 +725,49 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<ListSessi
             })
             .collect(),
     })
+}
+
+pub async fn list_temp_stores(State(state): State<Arc<AppState>>) -> Json<TempStoreListResponse> {
+    let stores = state.temp_store.list_stores();
+
+    Json(TempStoreListResponse {
+        stores: stores
+            .into_iter()
+            .map(|s| TempStoreListItem {
+                name: s.name,
+                chunks: s.chunk_count,
+                expires_at: s.expires_at.to_rfc3339(),
+            })
+            .collect(),
+    })
+}
+
+pub async fn temp_dump(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Json<TempDumpResponse> {
+    let chunks = state.temp_store.get_chunks(&name).unwrap_or_default();
+
+    Json(TempDumpResponse { name, chunks })
+}
+
+pub async fn delete_temp_store(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<DeleteResponse>, StatusCode> {
+    let deleted = state
+        .temp_store
+        .delete_store(&name)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if deleted == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(Json(DeleteResponse {
+        deleted_chunks: deleted,
+        session: name,
+    }))
 }
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
@@ -628,6 +924,9 @@ pub struct InvertRequest {
     pub embedding: Vec<f32>,
     #[serde(default = "default_role")]
     pub role: String,
+    /// Maximum tokens to generate (default 64)
+    #[serde(default = "default_max_length")]
+    pub max_length: usize,
 }
 
 #[derive(Serialize)]
@@ -649,7 +948,7 @@ pub async fn invert(
         )
     })?;
 
-    let result = inverter.invert(&req.embedding).map_err(|e| {
+    let result = inverter.invert(&req.embedding, req.max_length).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -838,6 +1137,90 @@ gcloud run deploy shivvr \
 </html>"##))
 }
 
+// ===== Auth Middleware =====
+
+fn extract_bearer(req: &Request) -> Option<String> {
+    req.headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+fn query_role(query: Option<&str>) -> String {
+    query
+        .and_then(|q| {
+            q.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                if key == "role" {
+                    Some(value.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| "organize".to_string())
+}
+
+fn is_free_operation(path: &str, method: &Method, query: Option<&str>, state: &AppState) -> bool {
+    match (method, path) {
+        (&Method::GET, "/") => true,
+        (&Method::GET, "/health") => true,
+        (&Method::POST, p) if p.starts_with("/memory/") && p.ends_with("/ingest") => {
+            !state.openai_auth_required
+        }
+        (&Method::GET, p) if p.starts_with("/memory/") && p.ends_with("/search") => {
+            query_role(query) == "organize"
+        }
+        _ => false,
+    }
+}
+
+async fn nuts_auth_gate(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let is_free = is_free_operation(
+        req.uri().path(),
+        req.method(),
+        req.uri().query(),
+        &state,
+    );
+    let token = extract_bearer(&req);
+
+    match (is_free, &state.nuts_auth, token.as_deref()) {
+        (_, None, _) => next.run(req).await,
+        (true, Some(_), None) => next.run(req).await,
+        (true, Some(auth), Some(tok)) => {
+            if let Ok(claims) = auth.verify(tok).await {
+                req.extensions_mut().insert(claims);
+            }
+            next.run(req).await
+        }
+        (false, Some(_), None) => (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "authentication required".to_string(),
+            }),
+        )
+            .into_response(),
+        (false, Some(auth), Some(tok)) => match auth.verify(tok).await {
+            Ok(claims) => {
+                req.extensions_mut().insert(claims);
+                next.run(req).await
+            }
+            Err(_) => (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "invalid token".to_string(),
+                }),
+            )
+                .into_response(),
+        },
+    }
+}
+
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -849,11 +1232,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/memory/:session_id/search", get(search))
         .route("/memory/:session_id/info", get(session_info))
         .route("/memory/:session_id", delete(delete_session))
+        .route("/temp", get(list_temp_stores))
+        .route("/temp/:name/ingest", post(temp_ingest))
+        .route("/temp/:name/search", get(temp_search))
+        .route("/temp/:name/dump", get(temp_dump))
+        .route("/temp/:name", delete(delete_temp_store))
         // Phase 2: Crypto endpoints
         .route("/agent/:agent_id/register", post(register_agent))
         .route("/agent/:agent_id/decrypt", post(decrypt_embeddings))
         .route("/agent/:agent_id/encrypt", post(encrypt_embeddings))
         // Phase 3: Inversion endpoint
         .route("/invert", post(invert))
+        .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate))
         .with_state(state)
 }

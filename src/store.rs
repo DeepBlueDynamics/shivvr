@@ -2,7 +2,8 @@ use crate::similarity::cosine_similarity;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sled::Db;
+use std::collections::HashMap;
+use std::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
@@ -30,7 +31,7 @@ pub struct Chunk {
     pub agent_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SessionMeta {
     pub id: String,
     pub created_at: DateTime<Utc>,
@@ -39,129 +40,98 @@ pub struct SessionMeta {
     pub total_tokens: usize,
 }
 
-/// Key prefixes for sled
-/// chunks:{session_id}:{chunk_id} -> Chunk (bincode)
-/// meta:{session_id} -> SessionMeta (bincode)
-/// sessions -> Vec<String> of session IDs (bincode)
+struct Session {
+    chunks: Vec<Chunk>,
+    created_at: DateTime<Utc>,
+    last_ingested: DateTime<Utc>,
+    total_tokens: usize,
+}
 
+/// Ephemeral in-memory store. No persistence. All state is lost on restart.
 pub struct Store {
-    db: Db,
+    sessions: RwLock<HashMap<String, Session>>,
 }
 
 impl Store {
-    /// Open or create the database
-    pub fn open(path: &str) -> Result<Self> {
-        let db = sled::open(path)?;
-        Ok(Self { db })
-    }
-
-    /// Get a clone of the sled Db handle (for sharing with CryptoManager)
-    pub fn db(&self) -> Db {
-        self.db.clone()
-    }
-
-    /// Add chunks to a session
-    pub fn add_chunks(&self, session_id: &str, chunks: Vec<Chunk>) -> Result<()> {
-        let batch_size = chunks.len();
-        let tokens: usize = chunks.iter().map(|c| c.token_count).sum();
-
-        for chunk in &chunks {
-            let key = format!("chunks:{}:{}", session_id, chunk.id);
-            let value = serde_json::to_vec(chunk)?;
-            self.db.insert(key.as_bytes(), value)?;
+    pub fn new() -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
         }
+    }
 
-        let meta_key = format!("meta:{}", session_id);
-        let meta = match self.db.get(meta_key.as_bytes())? {
-            Some(bytes) => {
-                let mut meta: SessionMeta = serde_json::from_slice(&bytes)?;
-                meta.last_ingested = Utc::now();
-                meta.chunk_count += batch_size;
-                meta.total_tokens += tokens;
-                meta
-            }
-            None => {
-                self.add_session_to_list(session_id)?;
-                SessionMeta {
-                    id: session_id.to_string(),
-                    created_at: Utc::now(),
-                    last_ingested: Utc::now(),
-                    chunk_count: batch_size,
-                    total_tokens: tokens,
-                }
-            }
-        };
-        self.db.insert(meta_key.as_bytes(), serde_json::to_vec(&meta)?)?;
+    /// Add chunks to a session (creates session if it doesn't exist)
+    pub fn add_chunks(&self, session_id: &str, chunks: Vec<Chunk>) -> Result<()> {
+        let tokens: usize = chunks.iter().map(|c| c.token_count).sum();
+        let now = Utc::now();
 
-        self.db.flush()?;
+        let mut sessions = self.sessions.write().unwrap();
+        let session = sessions.entry(session_id.to_string()).or_insert_with(|| Session {
+            chunks: Vec::new(),
+            created_at: now,
+            last_ingested: now,
+            total_tokens: 0,
+        });
+
+        session.chunks.extend(chunks);
+        session.total_tokens += tokens;
+        session.last_ingested = now;
+
         Ok(())
     }
 
     /// Get all chunks for a session
     pub fn get_chunks(&self, session_id: &str) -> Result<Vec<Chunk>> {
-        let prefix = format!("chunks:{}:", session_id);
-        let mut chunks = Vec::new();
-
-        for item in self.db.scan_prefix(prefix.as_bytes()) {
-            let (_, value) = item?;
-            let chunk: Chunk = serde_json::from_slice(&value)?;
-            chunks.push(chunk);
-        }
-
-        Ok(chunks)
+        let sessions = self.sessions.read().unwrap();
+        Ok(sessions
+            .get(session_id)
+            .map(|s| s.chunks.clone())
+            .unwrap_or_default())
     }
 
     /// Get session metadata
     pub fn get_session_meta(&self, session_id: &str) -> Result<Option<SessionMeta>> {
-        let key = format!("meta:{}", session_id);
-        match self.db.get(key.as_bytes())? {
-            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            None => Ok(None),
-        }
+        let sessions = self.sessions.read().unwrap();
+        Ok(sessions.get(session_id).map(|s| SessionMeta {
+            id: session_id.to_string(),
+            created_at: s.created_at,
+            last_ingested: s.last_ingested,
+            chunk_count: s.chunks.len(),
+            total_tokens: s.total_tokens,
+        }))
     }
 
     /// Delete a session and all its chunks
     pub fn delete_session(&self, session_id: &str) -> Result<usize> {
-        let prefix = format!("chunks:{}:", session_id);
-        let mut deleted = 0;
-
-        for item in self.db.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = item?;
-            self.db.remove(key)?;
-            deleted += 1;
-        }
-
-        let meta_key = format!("meta:{}", session_id);
-        self.db.remove(meta_key.as_bytes())?;
-
-        self.remove_session_from_list(session_id)?;
-
-        self.db.flush()?;
+        let mut sessions = self.sessions.write().unwrap();
+        let deleted = sessions
+            .remove(session_id)
+            .map(|s| s.chunks.len())
+            .unwrap_or(0);
         Ok(deleted)
     }
 
     /// List all sessions
     pub fn list_sessions(&self) -> Result<Vec<SessionMeta>> {
-        let session_ids = self.get_session_list()?;
-        let mut sessions = Vec::new();
-
-        for id in session_ids {
-            if let Some(meta) = self.get_session_meta(&id)? {
-                sessions.push(meta);
-            }
-        }
-
-        Ok(sessions)
+        let sessions = self.sessions.read().unwrap();
+        Ok(sessions
+            .iter()
+            .map(|(id, s)| SessionMeta {
+                id: id.clone(),
+                created_at: s.created_at,
+                last_ingested: s.last_ingested,
+                chunk_count: s.chunks.len(),
+                total_tokens: s.total_tokens,
+            })
+            .collect())
     }
 
     /// Get total chunk count across all sessions
     pub fn total_chunks(&self) -> Result<usize> {
-        let sessions = self.list_sessions()?;
-        Ok(sessions.iter().map(|s| s.chunk_count).sum())
+        let sessions = self.sessions.read().unwrap();
+        Ok(sessions.values().map(|s| s.chunks.len()).sum())
     }
 
     /// Get the embedding for a chunk by role ("organize" or "retrieve")
-    /// "retrieve" falls back to "organize" if no retrieve embedding exists
     fn get_embedding_for_role<'a>(chunk: &'a Chunk, role: &str) -> &'a [f32] {
         if role == "retrieve" {
             if let Some(ref emb) = chunk.embedding_retrieve {
@@ -178,6 +148,7 @@ impl Store {
         query_embedding: &[f32],
         n: usize,
         time_weight: Option<f32>,
+        decay_halflife_hours: f32,
         role: &str,
     ) -> Result<Vec<(Chunk, f32)>> {
         let chunks = self.get_chunks(session_id)?;
@@ -197,7 +168,7 @@ impl Store {
 
                 let time_score = if time_weight > 0.0 {
                     let age_hours = (now - chunk.created_at).num_hours() as f32;
-                    (-age_hours / 168.0).exp()
+                    (-age_hours / decay_halflife_hours).exp()
                 } else {
                     0.0
                 };
@@ -268,38 +239,14 @@ impl Store {
             })
             .collect())
     }
-
-    fn get_session_list(&self) -> Result<Vec<String>> {
-        match self.db.get(b"sessions")? {
-            Some(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    fn add_session_to_list(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.get_session_list()?;
-        if !sessions.contains(&session_id.to_string()) {
-            sessions.push(session_id.to_string());
-            self.db.insert(b"sessions", serde_json::to_vec(&sessions)?)?;
-        }
-        Ok(())
-    }
-
-    fn remove_session_from_list(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.get_session_list()?;
-        sessions.retain(|s| s != session_id);
-        self.db.insert(b"sessions", serde_json::to_vec(&sessions)?)?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn temp_store() -> Store {
-        let path = std::env::temp_dir().join(format!("shivvr_store_{}", uuid::Uuid::new_v4()));
-        Store::open(path.to_str().unwrap()).unwrap()
+    fn make_store() -> Store {
+        Store::new()
     }
 
     fn make_chunk(id: &str, embedding: Vec<f32>, retrieve: Option<Vec<f32>>) -> Chunk {
@@ -358,7 +305,6 @@ mod tests {
 
     #[test]
     fn chunk_backward_compat_missing_new_fields() {
-        // Simulate a chunk serialized before v2 (no new fields)
         let json = r#"{
             "id": "chunk-old",
             "text": "old chunk",
@@ -397,14 +343,14 @@ mod tests {
     fn get_embedding_retrieve_role_fallback() {
         let chunk = make_chunk("c1", vec![1.0, 0.0], None);
         let emb = Store::get_embedding_for_role(&chunk, "retrieve");
-        assert_eq!(emb, &[1.0, 0.0]); // falls back to organize
+        assert_eq!(emb, &[1.0, 0.0]);
     }
 
     // ===== Store CRUD tests =====
 
     #[test]
     fn add_and_get_chunks() {
-        let store = temp_store();
+        let store = make_store();
         let chunks = vec![
             make_chunk("c1", vec![1.0, 0.0], None),
             make_chunk("c2", vec![0.0, 1.0], Some(vec![0.5, 0.5])),
@@ -415,7 +361,6 @@ mod tests {
         let retrieved = store.get_chunks("session1").unwrap();
         assert_eq!(retrieved.len(), 2);
 
-        // Verify retrieve embedding survived storage
         let c2 = retrieved.iter().find(|c| c.id == "c2").unwrap();
         assert!(c2.embedding_retrieve.is_some());
         assert_eq!(c2.embedding_retrieve.as_ref().unwrap().len(), 2);
@@ -423,7 +368,7 @@ mod tests {
 
     #[test]
     fn session_meta_tracks_chunks() {
-        let store = temp_store();
+        let store = make_store();
         store
             .add_chunks("s1", vec![make_chunk("c1", vec![1.0], None)])
             .unwrap();
@@ -433,12 +378,12 @@ mod tests {
 
         let meta = store.get_session_meta("s1").unwrap().unwrap();
         assert_eq!(meta.chunk_count, 2);
-        assert_eq!(meta.total_tokens, 20); // 10 per chunk
+        assert_eq!(meta.total_tokens, 20);
     }
 
     #[test]
     fn delete_session_removes_everything() {
-        let store = temp_store();
+        let store = make_store();
         store
             .add_chunks(
                 "s1",
@@ -457,7 +402,7 @@ mod tests {
 
     #[test]
     fn list_sessions() {
-        let store = temp_store();
+        let store = make_store();
         store
             .add_chunks("alpha", vec![make_chunk("c1", vec![1.0], None)])
             .unwrap();
@@ -473,9 +418,8 @@ mod tests {
 
     #[test]
     fn search_organize_role() {
-        let store = temp_store();
+        let store = make_store();
 
-        // Use 4d L2-normalized embeddings
         let chunks = vec![
             make_chunk("match", l2_normalize(&[1.0, 0.0, 0.0, 0.0]), None),
             make_chunk("partial", l2_normalize(&[0.7, 0.7, 0.0, 0.0]), None),
@@ -484,7 +428,7 @@ mod tests {
         store.add_chunks("s1", chunks).unwrap();
 
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
-        let results = store.search("s1", &query, 3, None, "organize").unwrap();
+        let results = store.search("s1", &query, 3, None, 168.0, "organize").unwrap();
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0.id, "match");
@@ -495,63 +439,57 @@ mod tests {
 
     #[test]
     fn search_retrieve_role_uses_retrieve_embedding() {
-        let store = temp_store();
+        let store = make_store();
 
-        // organize embedding points one way, retrieve embedding points another
         let chunks = vec![
             make_chunk(
                 "c1",
-                l2_normalize(&[1.0, 0.0, 0.0, 0.0]),       // organize: +x
-                Some(l2_normalize(&[0.0, 1.0, 0.0, 0.0])),  // retrieve: +y
+                l2_normalize(&[1.0, 0.0, 0.0, 0.0]),
+                Some(l2_normalize(&[0.0, 1.0, 0.0, 0.0])),
             ),
             make_chunk(
                 "c2",
-                l2_normalize(&[0.0, 1.0, 0.0, 0.0]),       // organize: +y
-                Some(l2_normalize(&[1.0, 0.0, 0.0, 0.0])),  // retrieve: +x
+                l2_normalize(&[0.0, 1.0, 0.0, 0.0]),
+                Some(l2_normalize(&[1.0, 0.0, 0.0, 0.0])),
             ),
         ];
         store.add_chunks("s1", chunks).unwrap();
 
-        // Query in +x direction
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
 
-        // Organize search: c1 should win (organize embed is +x)
-        let org_results = store.search("s1", &query, 2, None, "organize").unwrap();
+        let org_results = store.search("s1", &query, 2, None, 168.0, "organize").unwrap();
         assert_eq!(org_results[0].0.id, "c1");
 
-        // Retrieve search: c2 should win (retrieve embed is +x)
-        let ret_results = store.search("s1", &query, 2, None, "retrieve").unwrap();
+        let ret_results = store.search("s1", &query, 2, None, 168.0, "retrieve").unwrap();
         assert_eq!(ret_results[0].0.id, "c2");
     }
 
     #[test]
     fn search_retrieve_fallback_when_no_retrieve_embedding() {
-        let store = temp_store();
+        let store = make_store();
 
         let chunks = vec![
-            make_chunk("c1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]), None), // no retrieve
-            make_chunk("c2", l2_normalize(&[0.0, 1.0, 0.0, 0.0]), None), // no retrieve
+            make_chunk("c1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]), None),
+            make_chunk("c2", l2_normalize(&[0.0, 1.0, 0.0, 0.0]), None),
         ];
         store.add_chunks("s1", chunks).unwrap();
 
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
-
-        // Retrieve search falls back to organize
-        let results = store.search("s1", &query, 2, None, "retrieve").unwrap();
+        let results = store.search("s1", &query, 2, None, 168.0, "retrieve").unwrap();
         assert_eq!(results[0].0.id, "c1");
     }
 
     #[test]
     fn search_empty_session() {
-        let store = temp_store();
+        let store = make_store();
         let query = vec![1.0, 0.0];
-        let results = store.search("empty", &query, 5, None, "organize").unwrap();
+        let results = store.search("empty", &query, 5, None, 168.0, "organize").unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn search_with_temporal_context_role() {
-        let store = temp_store();
+        let store = make_store();
 
         let chunks = vec![
             make_chunk("c1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]), None),
@@ -566,14 +504,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.id, "c1");
-        // c2 should be in nearby (same time window since just created)
         assert_eq!(results[0].2.len(), 1);
         assert_eq!(results[0].2[0].id, "c2");
     }
 
     #[test]
-    fn encrypted_chunk_persists() {
-        let store = temp_store();
+    fn encrypted_chunk_stored_in_memory() {
+        let store = make_store();
 
         let mut chunk = make_chunk("enc1", vec![0.5, 0.5], None);
         chunk.encrypted = true;

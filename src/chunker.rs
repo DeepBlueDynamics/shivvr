@@ -2,6 +2,7 @@ use crate::embedder::Embedder;
 use crate::similarity::cosine_similarity;
 use crate::store::Chunk;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct Chunker {
@@ -51,25 +52,35 @@ impl Chunker {
         source: Option<String>,
         metadata: serde_json::Value,
     ) -> Result<Vec<Chunk>> {
+        let mut embedding_cache = HashMap::new();
+
         // Handle tiny inputs
         if text.len() < 100 {
-            return self.single_chunk(text, source, metadata).await;
+            return self
+                .single_chunk(text, source, metadata, &mut embedding_cache)
+                .await;
         }
 
         // Split into sentences
         let sentences = self.split_sentences(text);
 
         if sentences.len() < 3 {
-            return self.single_chunk(text, source, metadata).await;
+            return self
+                .single_chunk(text, source, metadata, &mut embedding_cache)
+                .await;
         }
 
         // Monte Carlo sampling to find candidate boundaries
-        let candidate_regions = self.monte_carlo_sample(&sentences).await?;
+        let candidate_regions = self
+            .monte_carlo_sample(&sentences, &mut embedding_cache)
+            .await?;
 
         // Build boundaries
         let mut boundaries = vec![0];
         for (start, end) in candidate_regions {
-            let boundary = self.binary_search_boundary(&sentences, start, end).await?;
+            let boundary = self
+                .binary_search_boundary(&sentences, start, end, &mut embedding_cache)
+                .await?;
             if boundary > *boundaries.last().unwrap() {
                 boundaries.push(boundary);
             }
@@ -77,7 +88,9 @@ impl Chunker {
         boundaries.push(sentences.len());
 
         // Optimize boundaries
-        let boundaries = self.optimize_boundaries(&sentences, boundaries).await?;
+        let boundaries = self
+            .optimize_boundaries(&sentences, boundaries, &mut embedding_cache)
+            .await?;
 
         // Build chunks
         let mut chunks = Vec::new();
@@ -99,7 +112,7 @@ impl Chunker {
                 continue;
             }
 
-            let embedding = self.embedder.embed(&chunk_text)?;
+            let embedding = self.embed_cached(&chunk_text, &mut embedding_cache)?;
             let token_count = self.embedder.count_tokens(&chunk_text);
 
             chunks.push(Chunk {
@@ -127,8 +140,9 @@ impl Chunker {
         text: &str,
         source: Option<String>,
         metadata: serde_json::Value,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
     ) -> Result<Vec<Chunk>> {
-        let embedding = self.embedder.embed(text)?;
+        let embedding = self.embed_cached(text, embedding_cache)?;
         let token_count = self.embedder.count_tokens(text);
 
         Ok(vec![Chunk {
@@ -197,7 +211,11 @@ impl Chunker {
         sentences
     }
 
-    async fn monte_carlo_sample(&self, sentences: &[Sentence]) -> Result<Vec<(usize, usize)>> {
+    async fn monte_carlo_sample(
+        &self,
+        sentences: &[Sentence],
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<Vec<(usize, usize)>> {
         if sentences.len() < 5 {
             return Ok(vec![]);
         }
@@ -227,8 +245,8 @@ impl Chunker {
                     continue;
                 }
 
-                let before_emb = self.embedder.embed(&before_text)?;
-                let after_emb = self.embedder.embed(&after_text)?;
+                let before_emb = self.embed_cached(&before_text, embedding_cache)?;
+                let after_emb = self.embed_cached(&after_text, embedding_cache)?;
 
                 let similarity = cosine_similarity(&before_emb, &after_emb);
 
@@ -249,6 +267,7 @@ impl Chunker {
         sentences: &[Sentence],
         start: usize,
         end: usize,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
     ) -> Result<usize> {
         if end <= start + 1 {
             return Ok(start);
@@ -265,8 +284,8 @@ impl Chunker {
             let before_text = &sentences[pos - 1].text;
             let after_text = &sentences[pos].text;
 
-            let before_emb = self.embedder.embed(before_text)?;
-            let after_emb = self.embedder.embed(after_text)?;
+            let before_emb = self.embed_cached(before_text, embedding_cache)?;
+            let after_emb = self.embed_cached(after_text, embedding_cache)?;
 
             let sim = cosine_similarity(&before_emb, &after_emb);
             if sim < lowest_sim {
@@ -282,6 +301,7 @@ impl Chunker {
         &self,
         sentences: &[Sentence],
         mut boundaries: Vec<usize>,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
     ) -> Result<Vec<usize>> {
         for _ in 0..self.config.optimization_iterations {
             for i in 1..boundaries.len() - 1 {
@@ -291,14 +311,22 @@ impl Chunker {
 
                 // Try moving boundary left or right
                 let mut best_pos = curr;
-                let mut best_coherence = self.chunk_coherence(sentences, prev, curr).await?
-                    + self.chunk_coherence(sentences, curr, next).await?;
+                let mut best_coherence = self
+                    .chunk_coherence(sentences, prev, curr, embedding_cache)
+                    .await?
+                    + self
+                        .chunk_coherence(sentences, curr, next, embedding_cache)
+                        .await?;
 
                 for delta in [-1i32, 1i32] {
                     let new_pos = (curr as i32 + delta) as usize;
                     if new_pos > prev && new_pos < next {
-                        let coherence = self.chunk_coherence(sentences, prev, new_pos).await?
-                            + self.chunk_coherence(sentences, new_pos, next).await?;
+                        let coherence = self
+                            .chunk_coherence(sentences, prev, new_pos, embedding_cache)
+                            .await?
+                            + self
+                                .chunk_coherence(sentences, new_pos, next, embedding_cache)
+                                .await?;
                         if coherence > best_coherence {
                             best_coherence = coherence;
                             best_pos = new_pos;
@@ -313,7 +341,13 @@ impl Chunker {
         Ok(boundaries)
     }
 
-    async fn chunk_coherence(&self, sentences: &[Sentence], start: usize, end: usize) -> Result<f32> {
+    async fn chunk_coherence(
+        &self,
+        sentences: &[Sentence],
+        start: usize,
+        end: usize,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<f32> {
         if end <= start || start >= sentences.len() {
             return Ok(0.0);
         }
@@ -330,11 +364,25 @@ impl Chunker {
         }
 
         // Coherence = average pairwise similarity within chunk
-        let emb = self.embedder.embed(&chunk_text)?;
+        let emb = self.embed_cached(&chunk_text, embedding_cache)?;
 
         // For simplicity, just return magnitude as proxy for coherence
         let mag: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
         Ok(mag)
+    }
+
+    fn embed_cached(
+        &self,
+        text: &str,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<Vec<f32>> {
+        if let Some(embedding) = embedding_cache.get(text) {
+            return Ok(embedding.clone());
+        }
+
+        let embedding = self.embedder.embed(text)?;
+        embedding_cache.insert(text.to_string(), embedding.clone());
+        Ok(embedding)
     }
 
     async fn enforce_size_limits(

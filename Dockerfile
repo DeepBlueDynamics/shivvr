@@ -48,7 +48,6 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
 ENV PORT=8080
 ENV MODEL_PATH=/models/gtr-t5-base.onnx
 ENV TOKENIZER_PATH=/models/tokenizer.json
-ENV DATA_PATH=/data/shivvr
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
@@ -62,5 +61,4 @@ ENV INVERTER_DECODER_PATH=/models/inverter/decoder.onnx
 ENV INVERTER_TOKENIZER_PATH=/models/inverter/tokenizer.json
 
 EXPOSE 8080
-VOLUME ["/data"]
 ENTRYPOINT ["/shivvr"]

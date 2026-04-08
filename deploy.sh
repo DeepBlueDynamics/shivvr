@@ -10,6 +10,7 @@ echo "Tagging and pushing local image to ${IMAGE}..."
 docker tag gnosis-chunk-shivvr "${IMAGE}:latest"
 docker push "${IMAGE}:latest"
 
+# concurrency: GPU inference serializes — benchmark before raising above 4
 echo "Deploying ${SERVICE} to Cloud Run with L4 GPU..."
 gcloud run deploy "${SERVICE}" \
   --image "${IMAGE}:latest" \
@@ -23,10 +24,9 @@ gcloud run deploy "${SERVICE}" \
   --gpu-type nvidia-l4 \
   --max-instances 1 \
   --min-instances 0 \
-  --concurrency 80 \
+  --concurrency 4 \
   --execution-environment gen2 \
-  --port 8080 \
-  --set-env-vars "DATA_PATH=/data/shivvr"
+  --port 8080
 
 echo "Service URL:"
 gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format="value(status.url)"

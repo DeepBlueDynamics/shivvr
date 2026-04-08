@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "shivvr"
 version = "0.1.0"
@@ -17,7 +19,7 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
 # ML Inference (optional — needed for embedder/inverter/chunker, not for core store/crypto)
-ort = { version = "2.0.0-rc.11", features = ["download-binaries", "tls-native", "ndarray"], optional = true }
+ort = { version = "=2.0.0-rc.11", features = ["download-binaries", "tls-native", "ndarray"], optional = true }
 tokenizers = { version = "0.21", optional = true }
 
 # HTTP client (OpenAI API)
@@ -27,13 +29,10 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 simsimd = { version = "6.5.12", optional = true }
 ndarray = "0.17"
 
-# Storage
-sled = "0.34"
-bincode = "1.3"
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonwebtoken = "9"
 
 # Utils
 uuid = { version = "1", features = ["v4"] }
