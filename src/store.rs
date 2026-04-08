@@ -45,6 +45,9 @@ struct Session {
     created_at: DateTime<Utc>,
     last_ingested: DateTime<Utc>,
     total_tokens: usize,
+    /// Identity of the caller who created this session (user_id from auth claims).
+    /// None = created in open dev mode (no auth) — accessible to anyone.
+    owner: Option<String>,
 }
 
 /// Ephemeral in-memory store. No persistence. All state is lost on restart.
@@ -59,8 +62,9 @@ impl Store {
         }
     }
 
-    /// Add chunks to a session (creates session if it doesn't exist)
-    pub fn add_chunks(&self, session_id: &str, chunks: Vec<Chunk>) -> Result<()> {
+    /// Add chunks to a session (creates session if it doesn't exist).
+    /// `owner` is set only on creation — subsequent ingests don't change it.
+    pub fn add_chunks(&self, session_id: &str, chunks: Vec<Chunk>, owner: Option<&str>) -> Result<()> {
         let tokens: usize = chunks.iter().map(|c| c.token_count).sum();
         let now = Utc::now();
 
@@ -70,6 +74,7 @@ impl Store {
             created_at: now,
             last_ingested: now,
             total_tokens: 0,
+            owner: owner.map(|s| s.to_string()),
         });
 
         session.chunks.extend(chunks);
@@ -77,6 +82,20 @@ impl Store {
         session.last_ingested = now;
 
         Ok(())
+    }
+
+    /// Check if a caller is allowed to access a session.
+    /// Returns true if session has no owner (dev mode) or owner matches caller.
+    pub fn caller_owns_session(&self, session_id: &str, caller_id: Option<&str>) -> bool {
+        let sessions = self.sessions.read().unwrap();
+        match sessions.get(session_id) {
+            None => true, // session doesn't exist yet — allow (will be created)
+            Some(s) => match (&s.owner, caller_id) {
+                (None, _) => true,           // no owner = open dev mode, anyone can access
+                (Some(_), None) => false,    // owned session, unauthenticated caller
+                (Some(o), Some(c)) => o == c,
+            },
+        }
     }
 
     /// Get all chunks for a session
@@ -110,11 +129,18 @@ impl Store {
         Ok(deleted)
     }
 
-    /// List all sessions
-    pub fn list_sessions(&self) -> Result<Vec<SessionMeta>> {
+    /// List sessions visible to the caller.
+    /// With auth: returns only sessions owned by caller_id.
+    /// Without auth (caller_id = None): returns only unowned sessions.
+    pub fn list_sessions(&self, caller_id: Option<&str>) -> Result<Vec<SessionMeta>> {
         let sessions = self.sessions.read().unwrap();
         Ok(sessions
             .iter()
+            .filter(|(_, s)| match (&s.owner, caller_id) {
+                (None, None) => true,        // both unowned — dev mode sees unowned sessions
+                (Some(o), Some(c)) => o == c, // owned session matches caller
+                _ => false,
+            })
             .map(|(id, s)| SessionMeta {
                 id: id.clone(),
                 created_at: s.created_at,

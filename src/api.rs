@@ -220,8 +220,13 @@ pub struct ErrorResponse {
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    claims: Option<axum::Extension<crate::auth::NutsAuthClaims>>,
     Json(req): Json<IngestRequest>,
 ) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let caller_id = claims.as_ref().map(|c| c.user_id.as_str());
+    if !state.store.caller_owns_session(&session_id, caller_id) {
+        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "session not found".to_string() })));
+    }
     let start = std::time::Instant::now();
 
     let emotion_primary = req.emotion_primary.clone();
@@ -302,7 +307,7 @@ pub async fn ingest(
         })
         .collect();
 
-    state.store.add_chunks(&session_id, chunks).map_err(|e| {
+    state.store.add_chunks(&session_id, chunks, caller_id).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -421,10 +426,16 @@ pub async fn temp_ingest(
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    claims: Option<axum::Extension<crate::auth::NutsAuthClaims>>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
     let start = std::time::Instant::now();
     let role = &query.role;
+    let caller_id = claims.as_ref().map(|c| c.user_id.as_str());
+
+    if !state.store.caller_owns_session(&session_id, caller_id) {
+        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "session not found".to_string() })));
+    }
 
     // Resolve OpenAI embedder: prefer caller-supplied key, fall back to server key
     let openai_for_request = query.openai_api_key
@@ -687,7 +698,12 @@ pub async fn temp_search(
 pub async fn session_info(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    claims: Option<axum::Extension<crate::auth::NutsAuthClaims>>,
 ) -> Result<Json<SessionInfoResponse>, StatusCode> {
+    let caller_id = claims.as_ref().map(|c| c.user_id.as_str());
+    if !state.store.caller_owns_session(&session_id, caller_id) {
+        return Err(StatusCode::NOT_FOUND); // 404 not 403 — don't confirm existence
+    }
     let meta = state
         .store
         .get_session_meta(&session_id)
@@ -723,7 +739,12 @@ pub async fn session_info(
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    claims: Option<axum::Extension<crate::auth::NutsAuthClaims>>,
 ) -> Result<Json<DeleteResponse>, StatusCode> {
+    let caller_id = claims.as_ref().map(|c| c.user_id.as_str());
+    if !state.store.caller_owns_session(&session_id, caller_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let exists = state
         .store
         .get_session_meta(&session_id)
@@ -745,8 +766,12 @@ pub async fn delete_session(
     }))
 }
 
-pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<ListSessionsResponse> {
-    let sessions = state.store.list_sessions().unwrap_or_default();
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    claims: Option<axum::Extension<crate::auth::NutsAuthClaims>>,
+) -> Json<ListSessionsResponse> {
+    let caller_id = claims.as_ref().map(|c| c.user_id.as_str());
+    let sessions = state.store.list_sessions(caller_id).unwrap_or_default();
 
     Json(ListSessionsResponse {
         sessions: sessions
@@ -804,7 +829,7 @@ pub async fn delete_temp_store(
 }
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let sessions = state.store.list_sessions().unwrap_or_default();
+    let sessions = state.store.list_sessions(None).unwrap_or_default();
     let total_chunks = state.store.total_chunks().unwrap_or(0);
 
     let mut models = vec![ModelInfo {
@@ -1012,7 +1037,7 @@ pub async fn invert(
 // ===== Homepage =====
 
 pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
-    let sessions = state.store.list_sessions().unwrap_or_default().len();
+    let sessions = state.store.list_sessions(None).unwrap_or_default().len();
     let chunks = state.store.total_chunks().unwrap_or(0);
     let uptime = state.start_time.elapsed().as_secs();
     let gpu = if cfg!(feature = "cuda") { "CUDA" } else { "CPU" };
