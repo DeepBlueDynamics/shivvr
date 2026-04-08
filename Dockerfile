@@ -52,6 +52,10 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
 ENV PORT=8080
 ENV MODEL_PATH=/models/gtr-t5-base.onnx
 ENV TOKENIZER_PATH=/models/tokenizer.json
+ENV INVERTER_PROJECTION_PATH=/models/inverter/projection.onnx
+ENV INVERTER_ENCODER_PATH=/models/inverter/encoder.onnx
+ENV INVERTER_DECODER_PATH=/models/inverter/decoder.onnx
+ENV INVERTER_TOKENIZER_PATH=/models/inverter/tokenizer.json
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
