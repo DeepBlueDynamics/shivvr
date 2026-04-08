@@ -989,146 +989,320 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>shivvr</title>
+<title>shivvr — semantic embedding service</title>
+<meta name="description" content="Ephemeral semantic embedding service. Chunk text, embed with GTR-T5-base (768d), search by cosine similarity. Rust + ONNX Runtime + GPU on Cloud Run.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://shivvr.nuts.services">
+<meta property="og:title" content="shivvr — semantic embedding service">
+<meta property="og:description" content="Chunk. Embed. Search. Fully ephemeral. GTR-T5-base (768d) + ONNX Runtime on GPU. No disk. No state. Rust.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:site" content="@deepbluedyn">
+<meta name="twitter:title" content="shivvr — semantic embedding service">
+<meta name="twitter:description" content="Chunk. Embed. Search. Fully ephemeral. GTR-T5-base (768d) + ONNX Runtime on GPU. No disk. No state. Rust.">
 <style>
-  :root {{ --bg: #0a0a0f; --fg: #c8c8d0; --accent: #7b68ee; --dim: #555568;
-           --card: #12121a; --border: #1e1e2e; --green: #50fa7b; }}
+  :root {{
+    --bg: #0a0a0f; --fg: #c8c8d0; --accent: #7b68ee; --accent2: #9d8fff;
+    --dim: #555568; --card: #12121a; --border: #1e1e2e; --green: #50fa7b;
+    --red: #ff5555;
+  }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ background: var(--bg); color: var(--fg); font-family: 'SF Mono', 'Fira Code', monospace;
-          line-height: 1.7; padding: 2rem; max-width: 860px; margin: 0 auto; }}
-  h1 {{ color: var(--accent); font-size: 2.4rem; letter-spacing: -0.02em; margin-bottom: 0.25rem; }}
-  h1 span {{ color: var(--dim); font-weight: 300; font-size: 0.5em; }}
-  .tagline {{ color: var(--dim); font-size: 1rem; margin-bottom: 2.5rem; }}
-  h2 {{ color: var(--accent); font-size: 1.1rem; margin: 2rem 0 0.75rem; letter-spacing: 0.05em;
-        text-transform: uppercase; }}
-  .stats {{ display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 2rem; }}
-  .stat {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-           padding: 1rem 1.25rem; min-width: 140px; }}
-  .stat .val {{ font-size: 1.5rem; color: var(--green); font-weight: 700; }}
-  .stat .lbl {{ font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }}
-  .features {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-               gap: 1rem; margin-bottom: 1.5rem; }}
-  .feature {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-              padding: 1rem 1.25rem; }}
-  .feature b {{ color: var(--accent); }}
-  .feature p {{ color: var(--dim); font-size: 0.85rem; margin-top: 0.25rem; }}
-  pre {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-         padding: 1rem 1.25rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }}
-  code {{ color: var(--fg); }}
-  .comment {{ color: var(--dim); }}
-  table {{ width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 0.85rem; }}
-  th, td {{ text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }}
-  th {{ color: var(--accent); font-weight: 600; font-size: 0.75rem; text-transform: uppercase;
-       letter-spacing: 0.08em; }}
+  html {{ scroll-behavior: smooth; }}
+  body {{
+    background: var(--bg); color: var(--fg);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 14px; line-height: 1.75;
+    padding: 2.5rem 2rem; max-width: 900px; margin: 0 auto;
+  }}
+
+  /* ── Hero ── */
+  .hero {{ margin-bottom: 3rem; }}
+  .hero h1 {{
+    font-size: clamp(2rem, 5vw, 3rem);
+    color: var(--accent); letter-spacing: -0.03em;
+    line-height: 1.1; margin-bottom: 0.4rem;
+  }}
+  .hero h1 .ver {{ color: var(--dim); font-weight: 300; font-size: 0.42em; vertical-align: middle; }}
+  .hero .sub {{
+    color: var(--fg); font-size: 1.05rem; margin-bottom: 0.5rem;
+  }}
+  .hero .desc {{ color: var(--dim); font-size: 0.85rem; margin-bottom: 1.75rem; max-width: 560px; }}
+  .ctas {{ display: flex; gap: 0.75rem; flex-wrap: wrap; }}
+  .cta {{
+    display: inline-block;
+    padding: 0.55rem 1.25rem; border-radius: 6px; font-size: 0.82rem;
+    text-decoration: none; transition: all 0.15s;
+    border: 1px solid var(--accent); color: var(--accent);
+  }}
+  .cta:hover {{ background: var(--accent); color: #fff; text-decoration: none; }}
+  .cta.dim {{ border-color: var(--border); color: var(--dim); }}
+  .cta.dim:hover {{ border-color: var(--dim); background: transparent; color: var(--fg); }}
+
+  /* ── Stats strip ── */
+  .stats {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 1rem; margin-bottom: 3rem;
+  }}
+  .stat {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 1.2rem;
+  }}
+  .stat .val {{ font-size: 1.6rem; color: var(--green); font-weight: 700; line-height: 1.2; }}
+  .stat .lbl {{
+    font-size: 0.7rem; color: var(--dim);
+    text-transform: uppercase; letter-spacing: 0.1em; margin-top: 0.15rem;
+  }}
+
+  /* ── Section headings ── */
+  h2 {{
+    color: var(--accent); font-size: 0.72rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    margin: 2.5rem 0 0.9rem; padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }}
+
+  /* ── Capability cards ── */
+  .features {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.9rem; margin-bottom: 0.5rem;
+  }}
+  .feature {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 1.2rem;
+    transition: border-color 0.15s;
+  }}
+  .feature:hover {{ border-color: var(--accent); }}
+  .feature .name {{ color: var(--accent2); font-weight: 600; margin-bottom: 0.3rem; }}
+  .feature p {{ color: var(--dim); font-size: 0.82rem; line-height: 1.6; }}
+
+  /* ── Tables ── */
+  .tbl-wrap {{ overflow-x: auto; margin: 0.25rem 0 0.5rem; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.82rem; }}
+  th, td {{ text-align: left; padding: 0.45rem 0.8rem; border-bottom: 1px solid var(--border); }}
+  th {{
+    color: var(--dim); font-weight: 600; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }}
+  td:first-child {{ color: var(--dim); white-space: nowrap; }}
   td code {{ color: var(--green); }}
+  .method {{ color: var(--accent2); font-size: 0.75rem; }}
+  tr:last-child td {{ border-bottom: none; }}
+
+  /* ── Code blocks ── */
+  pre {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1.1rem 1.25rem;
+    overflow-x: auto; font-size: 0.8rem; line-height: 1.7;
+    margin: 0.25rem 0;
+  }}
+  .cm {{ color: var(--dim); }}
+  .kw {{ color: var(--accent2); }}
+
+  /* ── Inline ── */
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  .links {{ display: flex; gap: 1rem; margin-top: 2.5rem; margin-bottom: 1rem; }}
-  .links a {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-              padding: 0.6rem 1.25rem; font-size: 0.85rem; transition: border-color 0.2s; }}
+  code {{ color: var(--green); font-size: 0.82rem; }}
+
+  /* ── Footer links ── */
+  .links {{ display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 3rem; }}
+  .links a {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem 1.1rem; font-size: 0.8rem;
+    transition: border-color 0.15s;
+  }}
   .links a:hover {{ border-color: var(--accent); text-decoration: none; }}
-  .footer {{ color: var(--dim); font-size: 0.75rem; margin-top: 3rem; padding-top: 1.5rem;
-             border-top: 1px solid var(--border); }}
+
+  .footer {{
+    color: var(--dim); font-size: 0.72rem; margin-top: 1.5rem;
+    padding-top: 1.5rem; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
+  }}
+  .dot {{ color: var(--border); }}
 </style>
 </head>
 <body>
 
-<h1>shivvr <span>v0.1</span></h1>
-<p class="tagline">Ephemeral semantic embedding service. Throw text at it. Find it again.</p>
+<!-- Hero -->
+<div class="hero">
+  <h1>shivvr <span class="ver">v0.1</span></h1>
+  <p class="sub">Ephemeral semantic embedding service.</p>
+  <p class="desc">
+    Chunk text. Embed with GTR-T5-base (768d). Search by cosine similarity.<br>
+    Fully in-memory. No disk. No state between restarts. GPU on Cloud Run.
+  </p>
+  <div class="ctas">
+    <a class="cta" href="#api">View API</a>
+    <a class="cta" href="#quickstart">Quick Start</a>
+    <a class="cta" href="https://github.com/DeepBlueDynamics/shivvr">GitHub</a>
+    <a class="cta dim" href="/health">Health</a>
+    <a class="cta dim" href="/sessions">Sessions</a>
+  </div>
+</div>
 
+<!-- Live stats -->
 <div class="stats">
-  <div class="stat"><div class="val">{sessions}</div><div class="lbl">Sessions</div></div>
-  <div class="stat"><div class="val">{chunks}</div><div class="lbl">Chunks</div></div>
-  <div class="stat"><div class="val">{uptime}s</div><div class="lbl">Uptime</div></div>
-  <div class="stat"><div class="val">{gpu}</div><div class="lbl">Compute</div></div>
+  <div class="stat"><div class="val" id="s-sessions">{sessions}</div><div class="lbl">Sessions</div></div>
+  <div class="stat"><div class="val" id="s-chunks">{chunks}</div><div class="lbl">Chunks</div></div>
+  <div class="stat"><div class="val" id="s-uptime">{uptime}s</div><div class="lbl">Uptime</div></div>
+  <div class="stat"><div class="val" id="s-gpu">{gpu}</div><div class="lbl">Compute</div></div>
+  <div class="stat"><div class="val" id="s-enc">&#x2713;</div><div class="lbl">Encryption</div></div>
+  <div class="stat"><div class="val" id="s-inv">{inversion}</div><div class="lbl">Inversion</div></div>
 </div>
 
-<h2>What it does</h2>
+<!-- Capabilities -->
+<h2>Capabilities</h2>
 <div class="features">
-  <div class="feature"><b>Ingest</b><p>Chunks text by sentence boundaries, embeds each chunk with GTR-T5-base (768d). Fully in-memory, no disk.</p></div>
-  <div class="feature"><b>Search</b><p>Cosine similarity with optional temporal decay weighting and context expansion.</p></div>
-  <div class="feature"><b>Temp store</b><p>Named ephemeral vector stores with 2 hr TTL. Ideal for agent working memory.</p></div>
-  <div class="feature"><b>Crypto</b><p>Per-agent orthogonal matrix encryption. Cosine similarity preserved. Keys ephemeral.</p></div>
-  <div class="feature"><b>Inversion</b><p>Vec2text: reconstruct approximate text from an embedding vector. T5-based, currently {inversion}.</p></div>
-  <div class="feature"><b>Auth</b><p>nuts-auth JWT + API tokens. organize role always free; retrieve role requires token.</p></div>
+  <div class="feature">
+    <div class="name">Ingest</div>
+    <p>Sentence-boundary chunking + GTR-T5-base embeddings (768d). Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Search</div>
+    <p>Cosine similarity with optional temporal decay weighting (<code>decay_halflife_hours</code>) and nearby context expansion.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Temp store</div>
+    <p>Named ephemeral vector stores with 2 hr TTL. Ideal for agent working memory that doesn't need to outlive a session.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Crypto</div>
+    <p>Per-agent orthogonal matrix rotation on embeddings. Cosine similarity preserved under encryption. Keys are in-memory only.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Dual embedding</div>
+    <p><code>organize</code> role uses local GTR-T5-base (768d, always free). <code>retrieve</code> role uses OpenAI text-embedding-3-small (1536d, optional).</p>
+  </div>
+  <div class="feature">
+    <div class="name">Auth</div>
+    <p>nuts-auth RS256 JWT + <code>ahp_</code> API tokens. organize is always free. retrieve requires a token. Unset JWKS URL = open dev mode.</p>
+  </div>
 </div>
 
-<h2>API</h2>
+<!-- API -->
+<h2 id="api">API</h2>
+<div class="tbl-wrap">
 <table>
   <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
-  <tr><td>GET</td><td><code>/health</code></td><td>Status, models, session/chunk counts</td></tr>
-  <tr><td>GET</td><td><code>/sessions</code></td><td>List all sessions</td></tr>
-  <tr><td>POST</td><td><code>/sessions/:id/ingest</code></td><td>Ingest text (chunk + embed)</td></tr>
-  <tr><td>GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search</td></tr>
-  <tr><td>GET</td><td><code>/sessions/:id</code></td><td>Session metadata</td></tr>
-  <tr><td>DELETE</td><td><code>/sessions/:id</code></td><td>Delete session</td></tr>
-  <tr><td>GET</td><td><code>/temp</code></td><td>List temp stores</td></tr>
-  <tr><td>POST</td><td><code>/temp/:name/ingest</code></td><td>Ingest into temp store (2 hr TTL)</td></tr>
-  <tr><td>GET</td><td><code>/temp/:name/search?q=...</code></td><td>Search temp store</td></tr>
-  <tr><td>DELETE</td><td><code>/temp/:name</code></td><td>Delete temp store</td></tr>
-  <tr><td>POST</td><td><code>/agent/:id/register</code></td><td>Register per-agent encryption key</td></tr>
-  <tr><td>POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
-  <tr><td>POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
-  <tr><td>POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding</td></tr>
+  <tr><td class="method">GET</td><td><code>/health</code></td><td>Status, model info, live counts</td></tr>
+  <tr><td class="method">GET</td><td><code>/sessions</code></td><td>List all sessions</td></tr>
+  <tr><td class="method">POST</td><td><code>/sessions/:id/ingest</code></td><td>Chunk + embed text into session</td></tr>
+  <tr><td class="method">GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search with optional decay</td></tr>
+  <tr><td class="method">GET</td><td><code>/sessions/:id</code></td><td>Session metadata</td></tr>
+  <tr><td class="method">DELETE</td><td><code>/sessions/:id</code></td><td>Delete session</td></tr>
+  <tr><td class="method">GET</td><td><code>/temp</code></td><td>List temp stores with TTL</td></tr>
+  <tr><td class="method">POST</td><td><code>/temp/:name/ingest</code></td><td>Ingest into temp store (2 hr TTL)</td></tr>
+  <tr><td class="method">GET</td><td><code>/temp/:name/search?q=...</code></td><td>Search temp store</td></tr>
+  <tr><td class="method">DELETE</td><td><code>/temp/:name</code></td><td>Delete temp store</td></tr>
+  <tr><td class="method">POST</td><td><code>/agent/:id/register</code></td><td>Register per-agent orthogonal key</td></tr>
+  <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
+  <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
+  <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
 </table>
+</div>
 
-<h2>Quick start</h2>
-<pre><code><span class="comment"># 1. Export models (once)</span>
-bash scripts/fetch_models.sh
-
-<span class="comment"># 2. Start</span>
-docker compose up -d
-
-<span class="comment"># 3. Ingest</span>
-curl -X POST http://localhost:8080/sessions/my-session/ingest \
+<!-- Quick start -->
+<h2 id="quickstart">Quick start</h2>
+<pre><code><span class="cm"># Ingest</span>
+curl -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
   -H "Content-Type: application/json" \
-  -d '{{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts."}}'
+  -d '{{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts.", "source": "journal"}}'
 
-<span class="comment"># 4. Search</span>
-curl "http://localhost:8080/sessions/my-session/search?q=morning+at+the+marina&amp;n=5"</code></pre>
+<span class="cm"># Search</span>
+curl "https://shivvr.nuts.services/sessions/my-session/search?q=morning+at+the+marina&amp;n=5"
 
-<h2>Deploy on Cloud Run (GCP)</h2>
-<pre><code>docker compose build
-docker tag shivvr-shivvr gcr.io/YOUR_PROJECT/shivvr:latest
-docker push gcr.io/YOUR_PROJECT/shivvr:latest
+<span class="cm"># Search with temporal decay (30% recency, 24h half-life)</span>
+curl "https://shivvr.nuts.services/sessions/my-session/search?q=marina&amp;time_weight=0.3&amp;decay_halflife_hours=24"
 
-gcloud run deploy shivvr \
-  --image gcr.io/YOUR_PROJECT/shivvr:latest \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --memory 16Gi --cpu 4 \
-  --gpu 1 --gpu-type nvidia-l4 \
-  --concurrency 4 \
-  --max-instances 1 \
-  --port 8080</code></pre>
+<span class="cm"># Temp store (expires in 2h)</span>
+curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
+  -H "Content-Type: application/json" \
+  -d '{{"text": "Working notes for this agent session."}}'</code></pre>
 
+<!-- Search params -->
+<h2>Search parameters</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Param</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>q</code></td><td>required</td><td>Query text</td></tr>
+  <tr><td><code>n</code></td><td>5</td><td>Number of results</td></tr>
+  <tr><td><code>role</code></td><td>organize</td><td><code>organize</code> (768d local) or <code>retrieve</code> (1536d OpenAI)</td></tr>
+  <tr><td><code>time_weight</code></td><td>0.0</td><td>Blend semantic + recency score (0–1)</td></tr>
+  <tr><td><code>decay_halflife_hours</code></td><td>168</td><td>Recency decay half-life in hours</td></tr>
+  <tr><td><code>include_nearby</code></td><td>false</td><td>Return temporally adjacent chunks</td></tr>
+  <tr><td><code>agent_id</code></td><td>—</td><td>Agent ID for encrypted search</td></tr>
+</table>
+</div>
+
+<!-- Environment -->
 <h2>Environment</h2>
+<div class="tbl-wrap">
 <table>
   <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
-  <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base embedder</td></tr>
+  <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
   <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
-  <tr><td><code>OPENAI_API_KEY</code></td><td>&mdash;</td><td>Enables text-embedding-3-small retrieve role</td></tr>
-  <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>&mdash;</td><td>Enable auth (open dev mode if unset)</td></tr>
+  <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables text-embedding-3-small retrieve role</td></tr>
+  <tr><td><code>OPENAI_EMBEDDING_MODEL</code></td><td>text-embedding-3-small</td><td>Override OpenAI model</td></tr>
+  <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Enable auth (open dev mode if unset)</td></tr>
+  <tr><td><code>NUTS_AUTH_VALIDATE_URL</code></td><td>https://auth.nuts.services/api/validate</td><td>API token validation endpoint</td></tr>
 </table>
+</div>
 
+<!-- Stack -->
 <h2>Stack</h2>
+<div class="tbl-wrap">
 <table>
   <tr><th>Layer</th><th>Choice</th></tr>
   <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
-  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0</td></tr>
-  <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume</td></tr>
-  <tr><td>GPU</td><td>CUDA 12.6 via ort EP (probe-and-fallback to CPU)</td></tr>
-  <tr><td>Auth</td><td>nuts-auth RS256 JWT + ahp_ API tokens</td></tr>
+  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
+  <tr><td>Retrieve embedding</td><td>text-embedding-3-small via OpenAI API — optional</td></tr>
+  <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
+  <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
+  <tr><td>Auth</td><td>nuts-auth RS256 JWT + ahp_ API tokens — optional</td></tr>
+  <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>
 </table>
+</div>
 
+<!-- Footer links -->
 <div class="links">
   <a href="https://github.com/DeepBlueDynamics/shivvr">GitHub</a>
-  <a href="/health">Health</a>
+  <a href="/health">Health JSON</a>
   <a href="/sessions">Sessions</a>
 </div>
 
-<div class="footer">shivvr &middot; Rust + ONNX Runtime &middot; DeepBlueDynamics</div>
+<div class="footer">
+  <span>shivvr <span class="dot">&middot;</span> Rust + ONNX Runtime <span class="dot">&middot;</span> DeepBlueDynamics</span>
+  <span>shivvr.nuts.services</span>
+</div>
+
+<script>
+(function() {{
+  function fmt(n) {{
+    if (typeof n !== 'number') return n;
+    if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+    return String(n);
+  }}
+  function counter(el, target, suffix) {{
+    if (typeof target !== 'number' || target === 0) {{ el.textContent = fmt(target) + (suffix||''); return; }}
+    var start = 0, dur = 800, step = 16;
+    var t = setInterval(function() {{
+      start += step;
+      var pct = Math.min(start/dur, 1);
+      var val = Math.round(pct * target);
+      el.textContent = fmt(val) + (suffix||'');
+      if (pct >= 1) clearInterval(t);
+    }}, step);
+  }}
+  fetch('/health').then(function(r) {{ return r.json(); }}).then(function(d) {{
+    counter(document.getElementById('s-sessions'), d.sessions || 0, '');
+    counter(document.getElementById('s-chunks'), d.total_chunks || 0, '');
+    counter(document.getElementById('s-uptime'), d.uptime_seconds || 0, 's');
+    document.getElementById('s-gpu').textContent = d.gpu ? 'CUDA' : 'CPU';
+    document.getElementById('s-enc').textContent = d.encryption_available ? '\u2713' : '\u2715';
+    document.getElementById('s-inv').textContent = d.inversion_available ? 'on' : 'off';
+  }}).catch(function() {{}});
+}})();
+</script>
 
 </body>
 </html>"##))
