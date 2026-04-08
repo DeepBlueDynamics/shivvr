@@ -28,6 +28,7 @@ gcloud run deploy "${SERVICE}" \
   --min-instances 0 \
   --concurrency 4 \
   --execution-environment gen2 \
+  --no-gpu-zonal-redundancy \
   --port 8080
 
 echo ""
