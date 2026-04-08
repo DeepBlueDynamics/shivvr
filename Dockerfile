@@ -2,7 +2,8 @@
 FROM python:3.11-slim AS model-exporter
 
 RUN pip install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    torch torchvision torchaudio \
     transformers sentence-transformers onnx onnxruntime
 
 COPY scripts/export_gtr_models.py /export_gtr_models.py
