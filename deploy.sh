@@ -6,12 +6,14 @@ REGION="us-central1"
 SERVICE="shivvr"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}"
 
-echo "Tagging and pushing local image to ${IMAGE}..."
-docker tag gnosis-chunk-shivvr "${IMAGE}:latest"
-docker push "${IMAGE}:latest"
+echo "==> Building and pushing via Cloud Build..."
+gcloud builds submit \
+  --tag "${IMAGE}:latest" \
+  --project "${PROJECT_ID}" \
+  --timeout 30m \
+  .
 
-# concurrency: GPU inference serializes — benchmark before raising above 4
-echo "Deploying ${SERVICE} to Cloud Run with L4 GPU..."
+echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU)..."
 gcloud run deploy "${SERVICE}" \
   --image "${IMAGE}:latest" \
   --region "${REGION}" \
@@ -28,5 +30,9 @@ gcloud run deploy "${SERVICE}" \
   --execution-environment gen2 \
   --port 8080
 
-echo "Service URL:"
-gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format="value(status.url)"
+echo ""
+echo "==> Service URL:"
+gcloud run services describe "${SERVICE}" \
+  --region "${REGION}" \
+  --project "${PROJECT_ID}" \
+  --format="value(status.url)"
