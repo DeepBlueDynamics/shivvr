@@ -1169,7 +1169,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
   </div>
   <div class="feature">
     <div class="name">Dual embedding</div>
-    <p><code>organize</code> role uses local GTR-T5-base (768d, always free). <code>retrieve</code> role uses OpenAI text-embedding-3-small (1536d, optional).</p>
+    <p><code>organize</code> role uses local GTR-T5-base (768d, always free). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d, optional).</p>
   </div>
   <div class="feature">
     <div class="name">Auth</div>
@@ -1240,8 +1240,8 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
   <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
   <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
-  <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables text-embedding-3-small retrieve role</td></tr>
-  <tr><td><code>OPENAI_EMBEDDING_MODEL</code></td><td>text-embedding-3-small</td><td>Override OpenAI model</td></tr>
+  <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables text-embedding-ada-002 retrieve role</td></tr>
+  <tr><td><code>OPENAI_EMBEDDING_MODEL</code></td><td>text-embedding-ada-002</td><td>Override OpenAI model</td></tr>
   <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Enable auth (open dev mode if unset)</td></tr>
   <tr><td><code>NUTS_AUTH_VALIDATE_URL</code></td><td>https://auth.nuts.services/api/validate</td><td>API token validation endpoint</td></tr>
 </table>
@@ -1254,7 +1254,7 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
   <tr><th>Layer</th><th>Choice</th></tr>
   <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
   <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
-  <tr><td>Retrieve embedding</td><td>text-embedding-3-small via OpenAI API — optional</td></tr>
+  <tr><td>Retrieve embedding</td><td>text-embedding-ada-002 via OpenAI API — optional</td></tr>
   <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
   <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
   <tr><td>Auth</td><td>nuts-auth RS256 JWT + ahp_ API tokens — optional</td></tr>

@@ -121,8 +121,8 @@ Optional vars (set in Cloud Run console or via `--set-env-vars`):
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Enables `retrieve` role (text-embedding-3-small) |
-| `OPENAI_EMBEDDING_MODEL` | Override OpenAI model (default: text-embedding-3-small) |
+| `OPENAI_API_KEY` | Enables `retrieve` role (text-embedding-ada-002) |
+| `OPENAI_EMBEDDING_MODEL` | Override OpenAI model (default: text-embedding-ada-002) |
 | `NUTS_AUTH_JWKS_URL` | Enable nuts-auth JWT verification |
 | `NUTS_AUTH_VALIDATE_URL` | API token validation endpoint |
 

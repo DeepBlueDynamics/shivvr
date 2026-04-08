@@ -8,7 +8,7 @@ Rust + ONNX Runtime. Runs in Docker on port 8080.
 
 - **Ingest** — chunks text by sentence boundaries, embeds each chunk with GTR-T5-base (768d local, always on)
 - **Search** — cosine similarity with optional temporal decay weighting
-- **Dual embedding** — local GTR-T5-base for `organize` role (768d), optional OpenAI text-embedding-3-small for `retrieve` role (1536d)
+- **Dual embedding** — local GTR-T5-base for `organize` role (768d), optional OpenAI text-embedding-ada-002 for `retrieve` role (1536d)
 - **Per-agent encryption** — orthogonal matrix rotation on embeddings; preserves cosine similarity, keys ephemeral
 - **Vec2text inversion** — reconstruct approximate text from an embedding vector (optional, requires inverter models)
 - **Temp store** — named ephemeral vector stores with 2 hr TTL, separate from session store
@@ -141,8 +141,8 @@ curl "http://localhost:8080/sessions/my-session/search?q=marina&role=retrieve"
 | `PORT` | `8080` | Listen port |
 | `MODEL_PATH` | `models/gtr-t5-base.onnx` | GTR-T5-base ONNX embedder |
 | `TOKENIZER_PATH` | `models/tokenizer.json` | GTR tokenizer |
-| `OPENAI_API_KEY` | — | Enables text-embedding-3-small retrieve role |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Override OpenAI model |
+| `OPENAI_API_KEY` | — | Enables text-embedding-ada-002 retrieve role |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-ada-002` | Override OpenAI model |
 | `NUTS_AUTH_JWKS_URL` | — | Enable auth (open dev mode if unset) |
 | `NUTS_AUTH_VALIDATE_URL` | `https://auth.nuts.services/api/validate` | API token validation |
 | `INVERTER_PROJECTION_PATH` | `models/inverter/projection.onnx` | Vec2text projection |

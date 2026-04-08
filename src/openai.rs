@@ -29,7 +29,7 @@ impl OpenAIEmbedder {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let model = std::env::var("OPENAI_EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+            .unwrap_or_else(|_| "text-embedding-ada-002".to_string());
 
         Ok(Self {
             client,
