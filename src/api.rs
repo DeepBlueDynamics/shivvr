@@ -44,6 +44,8 @@ pub struct IngestRequest {
     pub emotion_secondary: Option<String>,
     /// Agent ID for per-agent encryption
     pub agent_id: Option<String>,
+    /// Caller-supplied OpenAI API key — enables retrieve embedding without server key
+    pub openai_api_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +91,8 @@ pub struct SearchQuery {
     pub role: String,
     /// Agent ID for encrypted search
     pub agent_id: Option<String>,
+    /// Caller-supplied OpenAI API key — enables retrieve role without server key
+    pub openai_api_key: Option<String>,
 }
 
 fn default_n() -> usize {
@@ -236,8 +240,17 @@ pub async fn ingest(
             )
         })?;
 
-    // Batch-embed with ada-002 if available (graceful degradation)
-    if let Some(ref openai) = state.openai_embedder {
+    // Batch-embed with ada-002 — prefer caller-supplied key, fall back to server key
+    let openai_for_request = req.openai_api_key
+        .as_deref()
+        .map(|k| crate::openai::OpenAIEmbedder::new(k.to_string()))
+        .transpose()
+        .ok()
+        .flatten()
+        .map(Arc::new);
+    let effective_openai = openai_for_request.as_ref().or(state.openai_embedder.as_ref());
+
+    if let Some(openai) = effective_openai {
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         match openai.embed_batch(&texts).await {
             Ok(embeddings) => {
@@ -329,7 +342,16 @@ pub async fn temp_ingest(
             )
         })?;
 
-    if let Some(ref openai) = state.openai_embedder {
+    let openai_for_request = req.openai_api_key
+        .as_deref()
+        .map(|k| crate::openai::OpenAIEmbedder::new(k.to_string()))
+        .transpose()
+        .ok()
+        .flatten()
+        .map(Arc::new);
+    let effective_openai = openai_for_request.as_ref().or(state.openai_embedder.as_ref());
+
+    if let Some(openai) = effective_openai {
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         match openai.embed_batch(&texts).await {
             Ok(embeddings) => {
@@ -403,19 +425,29 @@ pub async fn search(
     let start = std::time::Instant::now();
     let role = &query.role;
 
-    // Reject retrieve role early if the retrieve embedder is not configured.
-    if role == "retrieve" && state.openai_embedder.is_none() {
+    // Resolve OpenAI embedder: prefer caller-supplied key, fall back to server key
+    let openai_for_request = query.openai_api_key
+        .as_deref()
+        .map(|k| crate::openai::OpenAIEmbedder::new(k.to_string()))
+        .transpose()
+        .ok()
+        .flatten()
+        .map(Arc::new);
+    let effective_openai = openai_for_request.as_ref().or(state.openai_embedder.as_ref());
+
+    // Reject retrieve role early if no OpenAI embedder available from any source
+    if role == "retrieve" && effective_openai.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "role=retrieve requires OPENAI embedder configuration".to_string(),
+                error: "role=retrieve requires an OpenAI API key (set OPENAI_API_KEY or pass openai_api_key in the request)".to_string(),
             }),
         ));
     }
 
     // Embed query with the appropriate model for the role
     let mut query_embedding = if role == "retrieve" {
-        let openai = state.openai_embedder.as_ref().expect("checked above");
+        let openai = effective_openai.as_ref().expect("checked above");
         openai.embed(&query.q).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
