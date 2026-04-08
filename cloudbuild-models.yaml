@@ -1,0 +1,12 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -f
+      - Dockerfile.models
+      - -t
+      - gcr.io/gnosis-459403/shivvr-models:latest
+      - .
+images:
+  - gcr.io/gnosis-459403/shivvr-models:latest
+timeout: 2400s

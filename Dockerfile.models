@@ -1,0 +1,23 @@
+# Standalone model-exporter image.
+# Build this separately when export_gtr_models.py or deps change.
+# Tag: gcr.io/gnosis-459403/shivvr-models:latest
+#
+#   gcloud builds submit --tag gcr.io/gnosis-459403/shivvr-models:latest \
+#     --config cloudbuild-models.yaml --project gnosis-459403 .
+
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    "torch==2.5.1+cpu" \
+    "transformers==4.44.2" \
+    "sentence-transformers==3.2.1" \
+    "vec2text" \
+    "onnx==1.16.2" \
+    "onnxruntime==1.19.2"
+
+COPY scripts/export_gtr_models.py /export_gtr_models.py
+
+RUN python /export_gtr_models.py --output_dir /models
+
+CMD ["echo", "models ready"]

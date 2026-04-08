@@ -1050,6 +1050,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>shivvr — semantic embedding service</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0a'/%3E%3Cpath d='M10 11 Q16 8 22 11 Q16 14 10 17 Q16 20 22 23' stroke='%2300c2a8' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <meta name="description" content="Ephemeral semantic embedding service. Chunk text, embed with GTR-T5-base (768d), search by cosine similarity. Rust + ONNX Runtime + GPU on Cloud Run.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://shivvr.nuts.services">

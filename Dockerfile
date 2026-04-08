@@ -1,18 +1,7 @@
-# Stage 1: Export GTR-T5-base to ONNX (downloads from HuggingFace at build time)
-FROM python:3.11-slim AS model-exporter
-
-RUN pip install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.5.1+cpu" \
-    "transformers==4.44.2" \
-    "sentence-transformers==3.2.1" \
-    "vec2text" \
-    "onnx==1.16.2" \
-    "onnxruntime==1.19.2"
-
-COPY scripts/export_gtr_models.py /export_gtr_models.py
-
-RUN python /export_gtr_models.py --output_dir /models
+# Stage 1: Pull pre-built models from shivvr-models base image.
+# Rebuild models image only when export_gtr_models.py or deps change:
+#   gcloud builds submit --config cloudbuild-models.yaml --project gnosis-459403 .
+FROM gcr.io/gnosis-459403/shivvr-models:latest AS models
 
 # Stage 2: Rust build (CUDA)
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04 AS builder
@@ -46,7 +35,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/shivvr /shivvr
 COPY --from=builder /ort-libs /usr/lib/onnxruntime/
-COPY --from=model-exporter /models /models
+COPY --from=models /models /models
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
 ENV PORT=8080
