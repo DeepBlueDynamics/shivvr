@@ -6,12 +6,13 @@ RUN pip install --no-cache-dir \
     "torch==2.5.1+cpu" \
     "transformers==4.44.2" \
     "sentence-transformers==3.2.1" \
+    "vec2text" \
     "onnx==1.16.2" \
     "onnxruntime==1.19.2"
 
 COPY scripts/export_gtr_models.py /export_gtr_models.py
 
-RUN python /export_gtr_models.py --output_dir /models --skip-inverter
+RUN python /export_gtr_models.py --output_dir /models
 
 # Stage 2: Rust build (CUDA)
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04 AS builder
