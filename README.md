@@ -1,129 +1,137 @@
 # shivvr
 
-Semantic memory service. Cuts text into pieces, embeds them, stores them, finds them again.
+Ephemeral semantic embedding service. Ingests text, chunks it, embeds it with GTR-T5-base (768d), and returns ranked results. No persistence — all state is in-process and lost on restart.
 
-Rust + ONNX + sled. Runs in Docker on port 8080.
+Rust + ONNX Runtime. Runs in Docker on port 8080.
 
 ## What it does
 
-- **Ingest** — chunks text by sentence boundaries, embeds each chunk with BGE-small-en-v1.5 (384d), stores in sled
-- **Search** — cosine similarity over organize embeddings, returns ranked chunks
-- **Dual embedding** — local BGE-small for organize (384d), optional OpenAI ada-002 for retrieve (1536d)
-- **Per-agent encryption** — identity-keyed orthogonal matrix encryption on embeddings
-- **Vec2text inversion** — reconstruct approximate text from embeddings (T5-based, optional)
-- **Emotion tagging** — vedana/feeling-tone metadata on each chunk at ingest time
+- **Ingest** — chunks text by sentence boundaries, embeds each chunk with GTR-T5-base (768d local, always on)
+- **Search** — cosine similarity with optional temporal decay weighting
+- **Dual embedding** — local GTR-T5-base for `organize` role (768d), optional OpenAI text-embedding-3-small for `retrieve` role (1536d)
+- **Per-agent encryption** — orthogonal matrix rotation on embeddings; preserves cosine similarity, keys ephemeral
+- **Vec2text inversion** — reconstruct approximate text from an embedding vector (optional, requires inverter models)
+- **Temp store** — named ephemeral vector stores with 2 hr TTL, separate from session store
+- **Auth** — nuts-auth JWT + API token verification (optional; open dev mode if `NUTS_AUTH_JWKS_URL` unset)
 
 ## Prerequisites
 
 ### NVIDIA Driver
 
-The Docker image uses CUDA 12.6. Your host NVIDIA driver must be **545+** to support this.
+The Docker image uses CUDA 12.6. Host driver must be **545+**.
 
-**Linux (Ubuntu/Debian):**
 ```bash
-# Check current driver
+# Check
 nvidia-smi
 
-# Install/upgrade driver
-sudo apt-get update
-sudo apt-get install -y nvidia-driver-590
-
-# Reboot required after install
-sudo reboot
+# Ubuntu/Debian upgrade
+sudo apt-get install -y nvidia-driver-590 && sudo reboot
 ```
 
-**Windows:**
-- Download the latest Game Ready or Studio driver from https://www.nvidia.com/Download/index.aspx
-- Run the installer, reboot when prompted
-- Verify with `nvidia-smi` in PowerShell
+Windows: download from nvidia.com, run installer, reboot.
 
 ### Docker + NVIDIA Container Toolkit
 
 **Linux:**
 ```bash
-# Install Docker (if not already installed)
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
-# Log out and back in for group change
 
-# Install NVIDIA Container Toolkit
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
   | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
   | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
 ```
 
-**Windows:**
-- Install Docker Desktop from https://www.docker.com/products/docker-desktop/
-- Docker Desktop includes GPU support automatically when WSL 2 backend is enabled
-- Ensure WSL 2 is installed: `wsl --install` in PowerShell (admin)
+**Windows:** Docker Desktop with WSL 2 backend includes GPU support automatically.
 
 ### Export ONNX Models
 
-Models are not included in the repo. Export them before building:
+Models are not in the repo. Run once before building the Docker image:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate   # Windows
+bash scripts/fetch_models.sh
+```
 
-pip install torch transformers==4.44.2 sentence-transformers vec2text onnx onnxruntime onnxscript
+This checks for Python deps, installs them if needed, exports GTR-T5-base + vec2text to `models/` (~280 MB), and runs a verification pass. Pass `--force` to re-export.
+
+Manual export:
+```bash
+pip install torch transformers sentence-transformers vec2text onnx onnxruntime
 python scripts/export_gtr_models.py --output_dir models/ --verify
 ```
 
-This produces ~280MB of model files in `models/`.
-
 ## Quick start
 
-```
+```bash
 docker compose up -d
 ```
 
-Builds from source with CUDA support, starts on `:8080`.
+Builds from source with CUDA, starts on `:8080`. No volume needed.
 
 ## API
 
-### Memory
+### Sessions
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Status, model info, session/chunk counts |
-| GET | `/memory` | List all sessions |
-| POST | `/memory/:session/ingest` | Ingest text (auto-chunks + embeds) |
-| GET | `/memory/:session/search?q=...` | Semantic search |
-| GET | `/memory/:session/info` | Session metadata |
-| DELETE | `/memory/:session` | Delete a session |
+| GET | `/sessions` | List all sessions |
+| POST | `/sessions/:id/ingest` | Ingest text (chunk + embed) |
+| GET | `/sessions/:id/search?q=...` | Semantic search |
+| GET | `/sessions/:id` | Session metadata |
+| DELETE | `/sessions/:id` | Delete session |
+
+### Temp store
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/temp` | List named temp stores (with TTL) |
+| POST | `/temp/:name/ingest` | Ingest into ephemeral named store (2 hr TTL) |
+| GET | `/temp/:name/search?q=...` | Search temp store |
+| GET | `/temp/:name` | Dump all chunks |
+| DELETE | `/temp/:name` | Delete temp store |
 
 ### Crypto
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/agent/:id/register` | Register agent encryption keys |
-| POST | `/agent/:id/encrypt` | Encrypt embeddings with agent key |
-| POST | `/agent/:id/decrypt` | Decrypt embeddings with agent key |
+| POST | `/agent/:id/register` | Register per-agent orthogonal key |
+| POST | `/agent/:id/encrypt` | Encrypt embeddings |
+| POST | `/agent/:id/decrypt` | Decrypt embeddings |
 
 ### Inversion
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/invert` | Reconstruct text from embedding vector |
+| POST | `/invert` | Reconstruct approximate text from embedding |
 
-### Ingest example
+### Ingest
 
 ```bash
-curl -X POST http://localhost:8080/memory/my-session/ingest \
+curl -X POST http://localhost:8080/sessions/my-session/ingest \
   -H "Content-Type: application/json" \
-  -d '{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts."}'
+  -d '{
+    "text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts.",
+    "source": "journal",
+    "emotion_primary": "calm"
+  }'
 ```
 
-### Search example
+### Search
 
 ```bash
-curl "http://localhost:8080/memory/my-session/search?q=morning+at+the+marina&top_k=5"
+# Basic
+curl "http://localhost:8080/sessions/my-session/search?q=morning+at+the+marina&n=5"
+
+# With temporal decay (half-life 24 hours, 30% time weight)
+curl "http://localhost:8080/sessions/my-session/search?q=marina&n=5&time_weight=0.3&decay_halflife_hours=24"
+
+# retrieve role (requires OPENAI_API_KEY)
+curl "http://localhost:8080/sessions/my-session/search?q=marina&role=retrieve"
 ```
 
 ## Environment
@@ -131,17 +139,47 @@ curl "http://localhost:8080/memory/my-session/search?q=morning+at+the+marina&top
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Listen port |
-| `DATA_PATH` | `/data/shivvr` | sled database directory |
-| `MODEL_PATH` | `/models/bge-small-en-v1.5.onnx` | BGE-small ONNX model |
-| `TOKENIZER_PATH` | `/models/tokenizer.json` | BGE tokenizer |
-| `OPENAI_API_KEY` | — | Enables ada-002 retrieve embeddings |
+| `MODEL_PATH` | `models/gtr-t5-base.onnx` | GTR-T5-base ONNX embedder |
+| `TOKENIZER_PATH` | `models/tokenizer.json` | GTR tokenizer |
+| `OPENAI_API_KEY` | — | Enables text-embedding-3-small retrieve role |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Override OpenAI model |
+| `NUTS_AUTH_JWKS_URL` | — | Enable auth (open dev mode if unset) |
+| `NUTS_AUTH_VALIDATE_URL` | `https://auth.nuts.services/api/validate` | API token validation |
+| `INVERTER_PROJECTION_PATH` | `models/inverter/projection.onnx` | Vec2text projection |
+| `INVERTER_ENCODER_PATH` | `models/inverter/encoder.onnx` | Vec2text T5 encoder |
+| `INVERTER_DECODER_PATH` | `models/inverter/decoder.onnx` | Vec2text T5 decoder |
+| `INVERTER_TOKENIZER_PATH` | `models/inverter/tokenizer.json` | Vec2text tokenizer |
+
+## Search query parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `q` | required | Search query text |
+| `n` | `5` | Number of results |
+| `role` | `organize` | `organize` (768d local) or `retrieve` (1536d OpenAI) |
+| `time_weight` | `0.0` | Blend semantic score with recency (0–1) |
+| `decay_halflife_hours` | `168` | Recency decay half-life in hours |
+| `include_nearby` | — | Include temporally adjacent chunks in results |
+| `time_window_minutes` | `30` | Window for nearby chunks |
+| `agent_id` | — | Agent ID for encrypted search |
+| `max_length` | `64` | Max tokens for inverter output |
+
+## Auth
+
+If `NUTS_AUTH_JWKS_URL` is set, the service enforces nuts-auth:
+
+- **organize role** (local GTR) — always free, no token required
+- **retrieve role** (OpenAI) — requires `Authorization: Bearer <jwt>` or `Authorization: ahp_<token>`
+
+Leave `NUTS_AUTH_JWKS_URL` unset for open dev mode.
 
 ## Stack
 
-- **Rust** — axum, tokio, sled, ort (ONNX Runtime)
-- **Embedding** — BGE-small-en-v1.5 (BAAI), 384 dimensions, L2-normalized
-- **Storage** — sled embedded database, persistent Docker volume
-- **Inversion** — T5-base hypothesis + corrector trained on MSMARCO (optional)
+- **Rust** — axum, tokio, ort (ONNX Runtime 2.0)
+- **Embedding** — GTR-T5-base (sentence-transformers), 768d, L2-normalized
+- **Storage** — ephemeral `RwLock<HashMap>`, no disk persistence
+- **Inversion** — vec2text gtr-base (projection + T5 encoder/decoder, optional)
+- **Auth** — nuts-auth RS256 JWT + `ahp_` API tokens
 
 ## License
 
