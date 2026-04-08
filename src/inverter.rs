@@ -29,17 +29,30 @@ pub struct Inverter {
 
 impl Inverter {
     fn build_session(model_path: &str) -> Result<Session> {
-        let mut builder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?;
-
         #[cfg(feature = "cuda")]
         {
             use ort::ep::CUDA;
-            builder = builder.with_execution_providers([CUDA::default().build()])?;
+            let cuda_result = Session::builder()
+                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
+                .and_then(|b| b.with_intra_threads(2))
+                .and_then(|b| b.with_execution_providers([CUDA::default().build()]))
+                .and_then(|b| b.commit_from_file(model_path));
+            match cuda_result {
+                Ok(session) => return Ok(session),
+                Err(e) => println!("Inverter CUDA not available ({}), using CPU", e),
+            }
         }
+        Ok(Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(2)?
+            .commit_from_file(model_path)?)
+    }
 
-        Ok(builder.commit_from_file(model_path)?)
+    fn build_cpu_session(model_path: &str) -> Result<Session> {
+        Ok(Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(2)?
+            .commit_from_file(model_path)?)
     }
 
     /// Load all ONNX models and tokenizer
@@ -55,7 +68,7 @@ impl Inverter {
         decoder_path: &str,
         tokenizer_path: &str,
     ) -> Result<Self> {
-        let projection = Self::build_session(projection_path)?;
+        let mut projection = Self::build_session(projection_path)?;
 
         // Detect embedding dimension from the projection model's input shape
         let embedding_dim = projection
@@ -67,8 +80,36 @@ impl Inverter {
             .map(|d| d as usize)
             .unwrap_or(768); // default to 768 (gtr-base)
 
-        let encoder = Self::build_session(encoder_path)?;
-        let decoder = Self::build_session(decoder_path)?;
+        // Probe CUDA: run a tiny projection to catch GPUs where CUDA session
+        // creates but kernels fail at runtime (e.g., Pascal/GTX 1080)
+        let cuda_ok = {
+            let probe = Value::from_array(
+                Array2::from_elem((1, embedding_dim), 0.0f32),
+            )?;
+            let result = projection.run(ort::inputs!["input" => probe]);
+            if let Err(ref e) = result {
+                println!("Inverter: CUDA probe failed ({})", e);
+            }
+            let ok = result.is_ok();
+            drop(result);
+            ok
+        };
+
+        if !cuda_ok {
+            println!("Inverter: CUDA probe failed, rebuilding all sessions as CPU");
+            projection = Self::build_cpu_session(projection_path)?;
+        }
+
+        let encoder = if cuda_ok {
+            Self::build_session(encoder_path)?
+        } else {
+            Self::build_cpu_session(encoder_path)?
+        };
+        let decoder = if cuda_ok {
+            Self::build_session(decoder_path)?
+        } else {
+            Self::build_cpu_session(decoder_path)?
+        };
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load T5 tokenizer: {}", e))?;

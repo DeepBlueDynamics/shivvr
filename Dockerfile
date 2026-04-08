@@ -26,7 +26,6 @@ RUN mkdir -p /ort-libs && \
 # Run: python scripts/export_gtr_models.py --output_dir models/
 # This produces gtr-t5-base.onnx, tokenizer.json, and inverter/ directory
 COPY models/gtr-t5-base.onnx /models/gtr-t5-base.onnx
-COPY models/gtr-t5-base.onnx.data /models/gtr-t5-base.onnx.data
 COPY models/tokenizer.json /models/tokenizer.json
 COPY models/inverter/projection.onnx /models/inverter/projection.onnx
 COPY models/inverter/encoder.onnx /models/inverter/encoder.onnx

@@ -8,6 +8,7 @@ services:
       - MODEL_PATH=/models/gtr-t5-base.onnx
       - TOKENIZER_PATH=/models/tokenizer.json
       - DATA_PATH=/data/shivvr
+      - LD_LIBRARY_PATH=/usr/lib/onnxruntime
     volumes:
       - shivvr-data:/data
     restart: unless-stopped

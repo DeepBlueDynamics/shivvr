@@ -15,18 +15,7 @@ pub struct Embedder {
 
 impl Embedder {
     pub fn new(model_path: &str, tokenizer_path: &str) -> Result<Self> {
-        let mut builder = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?;
-
-        #[cfg(feature = "cuda")]
-        {
-            use ort::ep::CUDA;
-            builder = builder.with_execution_providers([CUDA::default().build()])?;
-            println!("CUDA execution provider registered");
-        }
-
-        let session = builder.commit_from_file(model_path)?;
+        let session = Self::try_build_session(model_path)?;
 
         // Check if model accepts token_type_ids (BERT-based yes, T5-based no)
         let has_token_type_ids = session
@@ -42,6 +31,56 @@ impl Embedder {
             tokenizer,
             has_token_type_ids,
         })
+    }
+
+    fn try_build_session(model_path: &str) -> Result<Session> {
+        #[cfg(feature = "cuda")]
+        {
+            use ort::ep::CUDA;
+            let cuda_result = Session::builder()
+                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
+                .and_then(|b| b.with_intra_threads(4))
+                .and_then(|b| b.with_execution_providers([CUDA::default().build()]))
+                .and_then(|b| b.commit_from_file(model_path));
+            match cuda_result {
+                Ok(mut session) => {
+                    // Probe: run a tiny inference to catch GPUs where CUDA session
+                    // creates but kernels fail (e.g., Pascal/GTX 1080)
+                    let probe_ids = Value::from_array(
+                        Array2::from_elem((1, 1), 1i64),
+                    )?;
+                    let probe_mask = Value::from_array(
+                        Array2::from_elem((1, 1), 1i64),
+                    )?;
+                    let probe_ok = {
+                        let result = session.run(ort::inputs![
+                            "input_ids" => probe_ids,
+                            "attention_mask" => probe_mask,
+                        ]);
+                        match &result {
+                            Err(e) => println!("GPU: CUDA probe failed ({}), falling back to CPU", e),
+                            _ => {}
+                        }
+                        let ok = result.is_ok();
+                        drop(result);
+                        ok
+                    };
+                    if probe_ok {
+                        println!("GPU: CUDA session created and verified");
+                        return Ok(session);
+                    }
+                }
+                Err(e) => {
+                    println!("CUDA not available ({}), falling back to CPU", e);
+                }
+            }
+        }
+        let session = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(4)?
+            .commit_from_file(model_path)?;
+        println!("GPU: none (CPU session)");
+        Ok(session)
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {

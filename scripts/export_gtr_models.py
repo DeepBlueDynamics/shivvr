@@ -64,6 +64,7 @@ def export_embedder(output_dir: Path):
         (dummy_ids, dummy_mask),
         str(onnx_path),
         opset_version=14,
+        dynamo=False,
         input_names=["input_ids", "attention_mask"],
         output_names=["last_hidden_state"],
         dynamic_axes={
@@ -134,6 +135,7 @@ def export_inverter(output_dir: Path):
     torch.onnx.export(
         proj_wrapper, dummy_emb, str(inverter_dir / "projection.onnx"),
         opset_version=14,
+        dynamo=False,
         input_names=["input"],
         output_names=["output"],
         dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
@@ -165,6 +167,7 @@ def export_inverter(output_dir: Path):
         enc_wrapper, (dummy_embeds, dummy_mask),
         str(inverter_dir / "encoder.onnx"),
         opset_version=14,
+        dynamo=False,
         input_names=["inputs_embeds", "attention_mask"],
         output_names=["last_hidden_state"],
         dynamic_axes={
@@ -202,6 +205,7 @@ def export_inverter(output_dir: Path):
         (dummy_dec_ids, dummy_enc_hidden, dummy_enc_mask),
         str(inverter_dir / "decoder.onnx"),
         opset_version=14,
+        dynamo=False,
         input_names=["input_ids", "encoder_hidden_states", "encoder_attention_mask"],
         output_names=["logits"],
         dynamic_axes={
