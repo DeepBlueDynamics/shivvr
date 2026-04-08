@@ -200,6 +200,7 @@ pub struct ModelInfo {
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
+    pub version: String,
     pub models: Vec<ModelInfo>,
     pub sessions: usize,
     pub total_chunks: usize,
@@ -824,6 +825,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
 
     Json(HealthResponse {
         status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         models,
         sessions: sessions.len(),
         total_chunks,
@@ -1015,6 +1017,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
     let uptime = state.start_time.elapsed().as_secs();
     let gpu = if cfg!(feature = "cuda") { "CUDA" } else { "CPU" };
     let inversion = if state.inverter.is_some() { "enabled" } else { "disabled" };
+    let version = env!("CARGO_PKG_VERSION");
 
     Html(format!(r##"<!DOCTYPE html>
 <html lang="en">
@@ -1155,7 +1158,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 
 <!-- Hero -->
 <div class="hero">
-  <h1>shivvr <span class="ver">v0.1</span></h1>
+  <h1>shivvr <span class="ver">v{version}</span></h1>
   <p class="sub">Ephemeral semantic embedding service.</p>
   <p class="desc">
     Chunk text. Embed with GTR-T5-base (768d). Search by cosine similarity.<br>
