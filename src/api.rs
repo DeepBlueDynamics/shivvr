@@ -1337,10 +1337,16 @@ fn is_free_operation(path: &str, method: &Method, query: Option<&str>, state: &A
     match (method, path) {
         (&Method::GET, "/") => true,
         (&Method::GET, "/health") => true,
-        (&Method::POST, p) if p.starts_with("/memory/") && p.ends_with("/ingest") => {
+        (&Method::POST, p) if p.starts_with("/sessions/") && p.ends_with("/ingest") => {
             !state.openai_auth_required
         }
-        (&Method::GET, p) if p.starts_with("/memory/") && p.ends_with("/search") => {
+        (&Method::GET, p) if p.starts_with("/sessions/") && p.ends_with("/search") => {
+            query_role(query) == "organize"
+        }
+        (&Method::POST, p) if p.starts_with("/temp/") && p.ends_with("/ingest") => {
+            !state.openai_auth_required
+        }
+        (&Method::GET, p) if p.starts_with("/temp/") && p.ends_with("/search") => {
             query_role(query) == "organize"
         }
         _ => false,
@@ -1398,11 +1404,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(homepage))
         .route("/health", get(health))
-        .route("/memory", get(list_sessions))
-        .route("/memory/:session_id/ingest", post(ingest))
-        .route("/memory/:session_id/search", get(search))
-        .route("/memory/:session_id/info", get(session_info))
-        .route("/memory/:session_id", delete(delete_session))
+        .route("/sessions", get(list_sessions))
+        .route("/sessions/:session_id/ingest", post(ingest))
+        .route("/sessions/:session_id/search", get(search))
+        .route("/sessions/:session_id", get(session_info).delete(delete_session))
         .route("/temp", get(list_temp_stores))
         .route("/temp/:name/ingest", post(temp_ingest))
         .route("/temp/:name/search", get(temp_search))
