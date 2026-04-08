@@ -1034,7 +1034,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <body>
 
 <h1>shivvr <span>v0.1</span></h1>
-<p class="tagline">Semantic memory service. You throw text at it. It figures out the rest.</p>
+<p class="tagline">Ephemeral semantic embedding service. Throw text at it. Find it again.</p>
 
 <div class="stats">
   <div class="stat"><div class="val">{sessions}</div><div class="lbl">Sessions</div></div>
@@ -1045,55 +1045,51 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 
 <h2>What it does</h2>
 <div class="features">
-  <div class="feature"><b>Ingest</b><p>Chunks text by sentence boundaries, embeds each chunk with GTR-T5-base (768d), stores in sled.</p></div>
-  <div class="feature"><b>Search</b><p>Cosine similarity over embeddings with optional time-weighting and temporal context expansion.</p></div>
-  <div class="feature"><b>Crypto</b><p>Per-agent orthogonal matrix encryption on embeddings. Your vectors, your keys.</p></div>
-  <div class="feature"><b>Inversion</b><p>Vec2text: reconstruct approximate text from embedding vectors. T5-based, currently {inversion}.</p></div>
+  <div class="feature"><b>Ingest</b><p>Chunks text by sentence boundaries, embeds each chunk with GTR-T5-base (768d). Fully in-memory, no disk.</p></div>
+  <div class="feature"><b>Search</b><p>Cosine similarity with optional temporal decay weighting and context expansion.</p></div>
+  <div class="feature"><b>Temp store</b><p>Named ephemeral vector stores with 2 hr TTL. Ideal for agent working memory.</p></div>
+  <div class="feature"><b>Crypto</b><p>Per-agent orthogonal matrix encryption. Cosine similarity preserved. Keys ephemeral.</p></div>
+  <div class="feature"><b>Inversion</b><p>Vec2text: reconstruct approximate text from an embedding vector. T5-based, currently {inversion}.</p></div>
+  <div class="feature"><b>Auth</b><p>nuts-auth JWT + API tokens. organize role always free; retrieve role requires token.</p></div>
 </div>
 
 <h2>API</h2>
 <table>
   <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
   <tr><td>GET</td><td><code>/health</code></td><td>Status, models, session/chunk counts</td></tr>
-  <tr><td>GET</td><td><code>/memory</code></td><td>List all sessions</td></tr>
-  <tr><td>POST</td><td><code>/memory/:session/ingest</code></td><td>Ingest text (auto-chunk + embed)</td></tr>
-  <tr><td>GET</td><td><code>/memory/:session/search?q=...</code></td><td>Semantic search</td></tr>
-  <tr><td>GET</td><td><code>/memory/:session/info</code></td><td>Session metadata</td></tr>
-  <tr><td>DELETE</td><td><code>/memory/:session</code></td><td>Delete a session</td></tr>
-  <tr><td>POST</td><td><code>/agent/:id/register</code></td><td>Register encryption keys</td></tr>
+  <tr><td>GET</td><td><code>/sessions</code></td><td>List all sessions</td></tr>
+  <tr><td>POST</td><td><code>/sessions/:id/ingest</code></td><td>Ingest text (chunk + embed)</td></tr>
+  <tr><td>GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search</td></tr>
+  <tr><td>GET</td><td><code>/sessions/:id</code></td><td>Session metadata</td></tr>
+  <tr><td>DELETE</td><td><code>/sessions/:id</code></td><td>Delete session</td></tr>
+  <tr><td>GET</td><td><code>/temp</code></td><td>List temp stores</td></tr>
+  <tr><td>POST</td><td><code>/temp/:name/ingest</code></td><td>Ingest into temp store (2 hr TTL)</td></tr>
+  <tr><td>GET</td><td><code>/temp/:name/search?q=...</code></td><td>Search temp store</td></tr>
+  <tr><td>DELETE</td><td><code>/temp/:name</code></td><td>Delete temp store</td></tr>
+  <tr><td>POST</td><td><code>/agent/:id/register</code></td><td>Register per-agent encryption key</td></tr>
   <tr><td>POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
   <tr><td>POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
   <tr><td>POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding</td></tr>
 </table>
 
 <h2>Quick start</h2>
-<pre><code><span class="comment"># Clone and run with Docker Compose</span>
-git clone git@github.com:DeepBlueDynamics/shivvr.git
-cd shivvr
+<pre><code><span class="comment"># 1. Export models (once)</span>
+bash scripts/fetch_models.sh
+
+<span class="comment"># 2. Start</span>
 docker compose up -d
 
-<span class="comment"># Ingest some text</span>
-curl -X POST http://localhost:8080/memory/my-session/ingest \
+<span class="comment"># 3. Ingest</span>
+curl -X POST http://localhost:8080/sessions/my-session/ingest \
   -H "Content-Type: application/json" \
   -d '{{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts."}}'
 
-<span class="comment"># Search it</span>
-curl "http://localhost:8080/memory/my-session/search?q=morning+at+the+marina&amp;n=5"</code></pre>
-
-<h2>Deploy on Docker</h2>
-<pre><code><span class="comment"># CPU only (no NVIDIA GPU required)</span>
-docker compose up -d
-
-<span class="comment"># With GPU (requires nvidia-container-toolkit)</span>
-docker compose up -d    <span class="comment"># compose.yml reserves 1 GPU by default</span>
-
-<span class="comment"># Data persists in the shivvr-data volume</span>
-docker volume inspect shivvr-data</code></pre>
+<span class="comment"># 4. Search</span>
+curl "http://localhost:8080/sessions/my-session/search?q=morning+at+the+marina&amp;n=5"</code></pre>
 
 <h2>Deploy on Cloud Run (GCP)</h2>
-<pre><code><span class="comment"># Build, push, and deploy with L4 GPU</span>
-docker compose build
-docker tag gnosis-chunk-shivvr gcr.io/YOUR_PROJECT/shivvr:latest
+<pre><code>docker compose build
+docker tag shivvr-shivvr gcr.io/YOUR_PROJECT/shivvr:latest
 docker push gcr.io/YOUR_PROJECT/shivvr:latest
 
 gcloud run deploy shivvr \
@@ -1102,6 +1098,7 @@ gcloud run deploy shivvr \
   --allow-unauthenticated \
   --memory 16Gi --cpu 4 \
   --gpu 1 --gpu-type nvidia-l4 \
+  --concurrency 4 \
   --max-instances 1 \
   --port 8080</code></pre>
 
@@ -1109,29 +1106,29 @@ gcloud run deploy shivvr \
 <table>
   <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
-  <tr><td><code>DATA_PATH</code></td><td>/data/shivvr</td><td>sled database directory</td></tr>
-  <tr><td><code>MODEL_PATH</code></td><td>/models/gtr-t5-base.onnx</td><td>Embedding model</td></tr>
-  <tr><td><code>TOKENIZER_PATH</code></td><td>/models/tokenizer.json</td><td>Tokenizer</td></tr>
-  <tr><td><code>OPENAI_API_KEY</code></td><td>&mdash;</td><td>Enables ada-002 retrieve embeddings</td></tr>
+  <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base embedder</td></tr>
+  <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
+  <tr><td><code>OPENAI_API_KEY</code></td><td>&mdash;</td><td>Enables text-embedding-3-small retrieve role</td></tr>
+  <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>&mdash;</td><td>Enable auth (open dev mode if unset)</td></tr>
 </table>
 
 <h2>Stack</h2>
 <table>
   <tr><th>Layer</th><th>Choice</th></tr>
   <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
-  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime</td></tr>
-  <tr><td>Vector ops</td><td>simsimd (SIMD-accelerated cosine)</td></tr>
-  <tr><td>Storage</td><td>sled (embedded, ACID, persistent)</td></tr>
-  <tr><td>GPU</td><td>CUDA 12.6 via ort EP (optional)</td></tr>
+  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0</td></tr>
+  <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume</td></tr>
+  <tr><td>GPU</td><td>CUDA 12.6 via ort EP (probe-and-fallback to CPU)</td></tr>
+  <tr><td>Auth</td><td>nuts-auth RS256 JWT + ahp_ API tokens</td></tr>
 </table>
 
 <div class="links">
   <a href="https://github.com/DeepBlueDynamics/shivvr">GitHub</a>
-  <a href="/health">Health Check</a>
-  <a href="/memory">Sessions</a>
+  <a href="/health">Health</a>
+  <a href="/sessions">Sessions</a>
 </div>
 
-<div class="footer">shivvr &middot; Rust + ONNX + sled &middot; DeepBlueDynamics</div>
+<div class="footer">shivvr &middot; Rust + ONNX Runtime &middot; DeepBlueDynamics</div>
 
 </body>
 </html>"##))
