@@ -1270,8 +1270,16 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
 </div>
 
 <div class="footer">
-  <span>shivvr <span class="dot">&middot;</span> Rust + ONNX Runtime <span class="dot">&middot;</span> <a href="https://deepbluedynamics.com">DeepBlueDynamics</a> <span class="dot">&middot;</span> <a href="https://twitter.com/deepbluedynamic">@deepbluedynamic</a></span>
-  <span>shivvr.nuts.services</span>
+  <span>shivvr <span class="dot">&middot;</span> Rust + ONNX Runtime</span>
+  <span>
+    <a href="https://deepbluedynamics.com">DeepBlueDynamics</a>
+    <span class="dot">&middot;</span>
+    <a href="https://nuts.services">nuts.services</a>
+    <span class="dot">&middot;</span>
+    <a href="https://hyperia.nuts.services">hyperia</a>
+    <span class="dot">&middot;</span>
+    <a href="https://twitter.com/deepbluedynamic">@deepbluedynamic</a>
+  </span>
 </div>
 
 <script>
