@@ -996,7 +996,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <meta property="og:title" content="shivvr — semantic embedding service">
 <meta property="og:description" content="Chunk. Embed. Search. Fully ephemeral. GTR-T5-base (768d) + ONNX Runtime on GPU. No disk. No state. Rust.">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:site" content="@deepbluedyn">
+<meta name="twitter:site" content="@deepbluedynamic">
 <meta name="twitter:title" content="shivvr — semantic embedding service">
 <meta name="twitter:description" content="Chunk. Embed. Search. Fully ephemeral. GTR-T5-base (768d) + ONNX Runtime on GPU. No disk. No state. Rust.">
 <style>
@@ -1270,7 +1270,7 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
 </div>
 
 <div class="footer">
-  <span>shivvr <span class="dot">&middot;</span> Rust + ONNX Runtime <span class="dot">&middot;</span> DeepBlueDynamics</span>
+  <span>shivvr <span class="dot">&middot;</span> Rust + ONNX Runtime <span class="dot">&middot;</span> <a href="https://deepbluedynamics.com">DeepBlueDynamics</a> <span class="dot">&middot;</span> <a href="https://twitter.com/deepbluedynamic">@deepbluedynamic</a></span>
   <span>shivvr.nuts.services</span>
 </div>
 
