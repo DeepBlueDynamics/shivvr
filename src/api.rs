@@ -1201,7 +1201,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
   </div>
   <div class="feature">
     <div class="name">Dual embedding</div>
-    <p><code>organize</code> role uses local GTR-T5-base (768d, always free). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d, optional).</p>
+    <p><code>organize</code> role uses local GTR-T5-base (768d, always free). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d) — pass your own key per-request or set <code>OPENAI_API_KEY</code> server-side.</p>
   </div>
   <div class="feature">
     <div class="name">Auth</div>
@@ -1244,6 +1244,13 @@ curl "https://shivvr.nuts.services/sessions/my-session/search?q=morning+at+the+m
 <span class="cm"># Search with temporal decay (30% recency, 24h half-life)</span>
 curl "https://shivvr.nuts.services/sessions/my-session/search?q=marina&amp;time_weight=0.3&amp;decay_halflife_hours=24"
 
+<span class="cm"># Retrieve role with your own OpenAI key (no server key needed)</span>
+curl -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
+  -H "Content-Type: application/json" \
+  -d '{{"text": "Dense passage for retrieval.", "openai_api_key": "sk-..."}}'
+
+curl "https://shivvr.nuts.services/sessions/my-session/search?q=passage&amp;role=retrieve&amp;openai_api_key=sk-..."
+
 <span class="cm"># Temp store (expires in 2h)</span>
 curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
   -H "Content-Type: application/json" \
@@ -1261,6 +1268,7 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
   <tr><td><code>decay_halflife_hours</code></td><td>168</td><td>Recency decay half-life in hours</td></tr>
   <tr><td><code>include_nearby</code></td><td>false</td><td>Return temporally adjacent chunks</td></tr>
   <tr><td><code>agent_id</code></td><td>—</td><td>Agent ID for encrypted search</td></tr>
+  <tr><td><code>openai_api_key</code></td><td>—</td><td>Per-request OpenAI key for <code>retrieve</code> role (overrides server key)</td></tr>
 </table>
 </div>
 
