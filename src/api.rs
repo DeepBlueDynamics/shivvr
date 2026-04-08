@@ -1480,7 +1480,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(homepage))
         .route("/health", get(health))
-        .route("/sessions", get(list_sessions))
         .route("/sessions/:session_id/ingest", post(ingest))
         .route("/sessions/:session_id/search", get(search))
         .route("/sessions/:session_id", get(session_info).delete(delete_session))
