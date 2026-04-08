@@ -1,18 +1,9 @@
+#[cfg(feature = "ml")]
+use shivvr::{api, auth, chunker, crypto, embedder, inverter, openai, store, temp_store};
+#[cfg(feature = "ml")]
 use std::sync::Arc;
+#[cfg(feature = "ml")]
 use tokio::net::TcpListener;
-
-#[cfg(feature = "ml")]
-mod api;
-#[cfg(feature = "ml")]
-mod chunker;
-mod crypto;
-#[cfg(feature = "ml")]
-mod embedder;
-#[cfg(feature = "ml")]
-mod inverter;
-mod openai;
-mod similarity;
-mod store;
 
 #[cfg(feature = "ml")]
 #[tokio::main]
@@ -24,31 +15,51 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "models/gtr-t5-base.onnx".to_string());
     let tokenizer_path = std::env::var("TOKENIZER_PATH")
         .unwrap_or_else(|_| "models/tokenizer.json".to_string());
-    let data_path = std::env::var("DATA_PATH").unwrap_or_else(|_| "/data/shivvr".to_string());
-
-    // Phase 1: BGE-small embedder (required)
+    // Phase 1: GTR-T5-base embedder (required)
     println!("Loading embedding model from {}...", model_path);
     let embedder = Arc::new(embedder::Embedder::new(&model_path, &tokenizer_path)?);
 
-    // Phase 1: OpenAI ada-002 embedder (optional, graceful degradation)
+    // Phase 1: OpenAI retrieve embedder (optional, graceful degradation)
     let openai_embedder = match std::env::var("OPENAI_API_KEY") {
         Ok(key) if !key.is_empty() => {
-            println!("OpenAI API key found — ada-002 retrieve embeddings enabled");
+            println!("OpenAI API key found — retrieve embeddings enabled");
             Some(Arc::new(openai::OpenAIEmbedder::new(key)?))
         }
         _ => {
-            println!("No OPENAI_API_KEY — running organize-only mode");
+            println!("No OPENAI_API_KEY — organize-only mode (retrieve role unavailable)");
+            None
+        }
+    };
+    let openai_auth_required = openai_embedder.is_some();
+
+    let nuts_auth = match std::env::var("NUTS_AUTH_JWKS_URL") {
+        Ok(jwks_url) if !jwks_url.is_empty() => {
+            let validate_url = std::env::var("NUTS_AUTH_VALIDATE_URL")
+                .unwrap_or_else(|_| "https://auth.nuts.services/api/validate".to_string());
+            let auth = Arc::new(auth::NutsAuth::new(jwks_url, validate_url));
+            if let Err(e) = auth.refresh_jwks().await {
+                println!(
+                    "WARNING: Could not fetch JWKS from nuts-auth: {} — JWT verification unavailable until resolved",
+                    e
+                );
+            } else {
+                println!("Nuts-auth: JWKS loaded, JWT+API token verification active");
+            }
+            Some(auth)
+        }
+        _ => {
+            println!("WARNING: NUTS_AUTH_JWKS_URL not set — running unauthenticated dev mode");
             None
         }
     };
 
-    println!("Opening database at {}...", data_path);
-    let store = Arc::new(store::Store::open(&data_path)?);
+    let store = Arc::new(store::Store::new());
+    let temp_store = Arc::new(temp_store::TempStore::new());
 
     let chunker = Arc::new(chunker::Chunker::new(embedder.clone()));
 
-    // Phase 2: Crypto manager (shares sled db)
-    let crypto = Arc::new(crypto::CryptoManager::new(store.db()));
+    // Phase 2: Crypto manager (in-memory, keys lost on restart)
+    let crypto = Arc::new(crypto::CryptoManager::new());
 
     // Phase 3: Vec2text inverter (optional, needs ONNX models)
     let inverter = {
@@ -80,12 +91,26 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(api::AppState {
         store,
+        temp_store: temp_store.clone(),
         chunker,
         embedder,
         openai_embedder,
         crypto,
         inverter,
         start_time: std::time::Instant::now(),
+        nuts_auth,
+        openai_auth_required,
+    });
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+        loop {
+            interval.tick().await;
+            let removed = temp_store.sweep_expired();
+            if removed > 0 {
+                println!("Temp store sweeper removed {} expired stores", removed);
+            }
+        }
     });
 
     let app = api::router(state);

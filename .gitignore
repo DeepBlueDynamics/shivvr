@@ -19,3 +19,11 @@ title-test-results-*.json
 vectors-might/
 vector-smite/
 train-bge-inversion/
+models/
+training/.venv/
+training/embeddings/
+training/models/
+training/saves/
+training/saves-test/
+training/cache/
+training/**/__pycache__/

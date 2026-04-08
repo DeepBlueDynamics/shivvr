@@ -1,0 +1,11 @@
+# Core — install torch separately for your CUDA version first:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+transformers>=4.35.0
+datasets>=2.14.0
+tokenizers>=0.15.0
+sentencepiece>=0.1.99
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# ONNX export (step 3 only)
+onnx>=1.14.0

@@ -7,10 +7,11 @@ services:
       - PORT=8080
       - MODEL_PATH=/models/gtr-t5-base.onnx
       - TOKENIZER_PATH=/models/tokenizer.json
-      - DATA_PATH=/data/shivvr
       - LD_LIBRARY_PATH=/usr/lib/onnxruntime
-    volumes:
-      - shivvr-data:/data
+      # Optional: set OPENAI_API_KEY at runtime to enable retrieve embeddings
+      # - OPENAI_API_KEY=
+      # Optional: set NUTS_AUTH_JWKS_URL to enable authentication
+      # - NUTS_AUTH_JWKS_URL=
     restart: unless-stopped
     deploy:
       resources:
@@ -24,6 +25,3 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
-volumes:
-  shivvr-data:
