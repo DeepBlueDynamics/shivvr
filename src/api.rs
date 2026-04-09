@@ -1184,7 +1184,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 
 <!-- Hero -->
 <div class="hero">
-  <h1>shivvr <span class="ver">v{version}</span></h1>
+  <h1>shivvr 🔪 <span class="ver">v{version}</span></h1>
   <p class="sub">Ephemeral semantic embedding service.</p>
   <p class="desc">
     Chunk text. Embed with GTR-T5-base (768d). Search by cosine similarity.<br>
@@ -1195,14 +1195,11 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
     <a class="cta" href="#quickstart">Quick Start</a>
     <a class="cta" href="https://github.com/DeepBlueDynamics/shivvr">GitHub</a>
     <a class="cta dim" href="/health">Health</a>
-    <a class="cta dim" href="/sessions">Sessions</a>
   </div>
 </div>
 
 <!-- Live stats -->
 <div class="stats">
-  <div class="stat"><div class="val" id="s-sessions">{sessions}</div><div class="lbl">Sessions</div></div>
-  <div class="stat"><div class="val" id="s-chunks">{chunks}</div><div class="lbl">Chunks</div></div>
   <div class="stat"><div class="val" id="s-uptime">{uptime}s</div><div class="lbl">Uptime</div></div>
   <div class="stat"><div class="val" id="s-gpu">{gpu}</div><div class="lbl">Compute</div></div>
   <div class="stat"><div class="val" id="s-enc">&#x2713;</div><div class="lbl">Encryption</div></div>
@@ -1244,7 +1241,6 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <table>
   <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
   <tr><td class="method">GET</td><td><code>/health</code></td><td>Status, model info, live counts</td></tr>
-  <tr><td class="method">GET</td><td><code>/sessions</code></td><td>List all sessions</td></tr>
   <tr><td class="method">POST</td><td><code>/sessions/:id/ingest</code></td><td>Chunk + embed text into session</td></tr>
   <tr><td class="method">GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search with optional decay</td></tr>
   <tr><td class="method">GET</td><td><code>/sessions/:id</code></td><td>Session metadata</td></tr>
