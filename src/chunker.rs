@@ -62,11 +62,17 @@ impl Chunker {
         }
 
         // Split into sentences
-        let sentences = self.split_sentences(text);
+        let sentences = Self::split_sentences(text);
+
+        if sentences.is_empty() || sentences.len() == 1 {
+            return self
+                .word_window_chunks(text, source, metadata, &mut embedding_cache)
+                .await;
+        }
 
         if sentences.len() < 3 {
             return self
-                .single_chunk(text, source, metadata, &mut embedding_cache)
+                .greedy_sentence_chunks(&sentences, source, metadata, &mut embedding_cache)
                 .await;
         }
 
@@ -74,6 +80,12 @@ impl Chunker {
         let candidate_regions = self
             .monte_carlo_sample(&sentences, &mut embedding_cache)
             .await?;
+
+        if candidate_regions.is_empty() {
+            return self
+                .greedy_sentence_chunks(&sentences, source, metadata, &mut embedding_cache)
+                .await;
+        }
 
         // Build boundaries
         let mut boundaries = vec![0];
@@ -161,31 +173,24 @@ impl Chunker {
         }])
     }
 
-    fn split_sentences(&self, text: &str) -> Vec<Sentence> {
+    fn split_sentences(text: &str) -> Vec<Sentence> {
         let mut sentences = Vec::new();
         let mut start = 0;
 
-        // Simple sentence splitting on . ! ? followed by space or end
         let chars: Vec<char> = text.chars().collect();
         let mut i = 0;
 
         while i < chars.len() {
             let c = chars[i];
-            if (c == '.' || c == '!' || c == '?')
-                && (i + 1 >= chars.len() || chars[i + 1].is_whitespace())
-            {
-                let end = i + 1;
-                let sentence_text: String = chars[start..end].iter().collect();
-                let trimmed = sentence_text.trim();
-                if !trimmed.is_empty() {
-                    sentences.push(Sentence {
-                        text: trimmed.to_string(),
-                        start_char: start,
-                        end_char: end,
-                    });
-                }
-                // Skip whitespace after sentence
-                i += 1;
+            let sentence_boundary = (c == '.' || c == '!' || c == '?')
+                && (i + 1 >= chars.len() || chars[i + 1].is_whitespace());
+            let paragraph_boundary = c == '\n' && Self::is_double_newline(&chars, i);
+            let line_boundary = c == '\n' && Self::next_line_starts_boundary(&chars, i + 1);
+
+            if sentence_boundary || paragraph_boundary || line_boundary {
+                let end = if sentence_boundary { i + 1 } else { i };
+                Self::push_sentence(&mut sentences, &chars, start, end);
+                i = if sentence_boundary { i + 1 } else { i };
                 while i < chars.len() && chars[i].is_whitespace() {
                     i += 1;
                 }
@@ -197,18 +202,180 @@ impl Chunker {
 
         // Don't forget remaining text
         if start < chars.len() {
-            let sentence_text: String = chars[start..].iter().collect();
-            let trimmed = sentence_text.trim();
-            if !trimmed.is_empty() {
-                sentences.push(Sentence {
-                    text: trimmed.to_string(),
-                    start_char: start,
-                    end_char: chars.len(),
-                });
-            }
+            Self::push_sentence(&mut sentences, &chars, start, chars.len());
         }
 
         sentences
+    }
+
+    fn push_sentence(sentences: &mut Vec<Sentence>, chars: &[char], start: usize, end: usize) {
+        if start >= end || end > chars.len() {
+            return;
+        }
+
+        let sentence_text: String = chars[start..end].iter().collect();
+        let trimmed = sentence_text.trim();
+        if !trimmed.is_empty() {
+            sentences.push(Sentence {
+                text: trimmed.to_string(),
+                start_char: start,
+                end_char: end,
+            });
+        }
+    }
+
+    fn is_double_newline(chars: &[char], newline_index: usize) -> bool {
+        let mut i = newline_index + 1;
+        if i < chars.len() && chars[i] == '\r' {
+            i += 1;
+        }
+        i < chars.len() && chars[i] == '\n'
+    }
+
+    fn next_line_starts_boundary(chars: &[char], mut i: usize) -> bool {
+        if i < chars.len() && chars[i] == '\r' {
+            i += 1;
+        }
+
+        let mut j = i;
+        while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+            j += 1;
+        }
+
+        if j >= chars.len() || chars[j] == '\n' || chars[j] == '\r' {
+            return true;
+        }
+
+        if matches!(chars[j], '#' | '-' | '*' | '>') {
+            return true;
+        }
+
+        if chars[j].is_ascii_digit() {
+            j += 1;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            return j < chars.len() && chars[j] == '.';
+        }
+
+        false
+    }
+
+    async fn greedy_sentence_chunks(
+        &self,
+        sentences: &[Sentence],
+        source: Option<String>,
+        metadata: serde_json::Value,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<Vec<Chunk>> {
+        let texts = Self::sentence_text_windows(sentences, self.config.max_chunk_tokens, |text| {
+            self.embedder.count_tokens(text)
+        });
+        self.make_chunks_from_texts(texts, source, metadata, embedding_cache)
+            .await
+    }
+
+    fn sentence_text_windows<F>(
+        sentences: &[Sentence],
+        max_tokens: usize,
+        mut count_tokens: F,
+    ) -> Vec<String>
+    where
+        F: FnMut(&str) -> usize,
+    {
+        let mut chunks = Vec::new();
+        let mut current_text = String::new();
+        let mut current_tokens = 0;
+        let max_tokens = max_tokens.max(1);
+
+        for sentence in sentences {
+            let sentence_tokens = count_tokens(&sentence.text);
+
+            if current_tokens + sentence_tokens > max_tokens && !current_text.is_empty() {
+                chunks.push(current_text.clone());
+                current_text.clear();
+                current_tokens = 0;
+            }
+
+            if !current_text.is_empty() {
+                current_text.push(' ');
+            }
+            current_text.push_str(&sentence.text);
+            current_tokens += sentence_tokens;
+        }
+
+        if !current_text.is_empty() {
+            chunks.push(current_text);
+        }
+
+        chunks
+    }
+
+    async fn word_window_chunks(
+        &self,
+        text: &str,
+        source: Option<String>,
+        metadata: serde_json::Value,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<Vec<Chunk>> {
+        let texts = Self::word_text_windows(text, self.config.max_chunk_tokens);
+        self.make_chunks_from_texts(texts, source, metadata, embedding_cache)
+            .await
+    }
+
+    fn word_text_windows(text: &str, max_words: usize) -> Vec<String> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() {
+            return Vec::new();
+        }
+
+        words
+            .chunks(max_words.max(1))
+            .map(|window| window.join(" "))
+            .collect()
+    }
+
+    async fn make_chunks_from_texts(
+        &self,
+        texts: Vec<String>,
+        source: Option<String>,
+        metadata: serde_json::Value,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<Vec<Chunk>> {
+        let mut chunks = Vec::new();
+        for text in texts {
+            chunks.push(
+                self.make_chunk(text, source.clone(), metadata.clone(), embedding_cache)
+                    .await?,
+            );
+        }
+        Ok(chunks)
+    }
+
+    async fn make_chunk(
+        &self,
+        text: String,
+        source: Option<String>,
+        metadata: serde_json::Value,
+        embedding_cache: &mut HashMap<String, Vec<f32>>,
+    ) -> Result<Chunk> {
+        let embedding = self.embed_cached(&text, embedding_cache)?;
+        let token_count = self.embedder.count_tokens(&text);
+
+        Ok(Chunk {
+            id: format!("chunk-{}", uuid::Uuid::new_v4()),
+            text,
+            embedding,
+            embedding_retrieve: None,
+            token_count,
+            source,
+            metadata,
+            created_at: chrono::Utc::now(),
+            emotion_primary: None,
+            emotion_secondary: None,
+            encrypted: false,
+            agent_id: None,
+        })
     }
 
     async fn monte_carlo_sample(
@@ -412,59 +579,69 @@ impl Chunker {
         source: Option<String>,
         metadata: serde_json::Value,
     ) -> Result<Vec<Chunk>> {
-        let sentences = self.split_sentences(&chunk.text);
-        let mut result = Vec::new();
-        let mut current_text = String::new();
-        let mut current_tokens = 0;
+        let mut embedding_cache = HashMap::new();
+        let sentences = Self::split_sentences(&chunk.text);
 
-        for sentence in sentences {
-            let sentence_tokens = self.embedder.count_tokens(&sentence.text);
-
-            if current_tokens + sentence_tokens > self.config.max_chunk_tokens && !current_text.is_empty() {
-                let embedding = self.embedder.embed(&current_text)?;
-                result.push(Chunk {
-                    id: format!("chunk-{}", uuid::Uuid::new_v4()),
-                    text: current_text.clone(),
-                    embedding,
-                    embedding_retrieve: None,
-                    token_count: current_tokens,
-                    source: source.clone(),
-                    metadata: metadata.clone(),
-                    created_at: chrono::Utc::now(),
-                    emotion_primary: None,
-                    emotion_secondary: None,
-                    encrypted: false,
-                    agent_id: None,
-                });
-                current_text.clear();
-                current_tokens = 0;
-            }
-
-            if !current_text.is_empty() {
-                current_text.push(' ');
-            }
-            current_text.push_str(&sentence.text);
-            current_tokens += sentence_tokens;
+        if sentences.is_empty() || sentences.len() == 1 {
+            return self
+                .word_window_chunks(&chunk.text, source, metadata, &mut embedding_cache)
+                .await;
         }
 
-        if !current_text.is_empty() {
-            let embedding = self.embedder.embed(&current_text)?;
-            result.push(Chunk {
-                id: format!("chunk-{}", uuid::Uuid::new_v4()),
-                text: current_text,
-                embedding,
-                embedding_retrieve: None,
-                token_count: current_tokens,
-                source: source.clone(),
-                metadata: metadata.clone(),
-                created_at: chrono::Utc::now(),
-                emotion_primary: None,
-                emotion_secondary: None,
-                encrypted: false,
-                agent_id: None,
-            });
-        }
+        self.greedy_sentence_chunks(&sentences, source, metadata, &mut embedding_cache)
+            .await
+    }
+}
 
-        Ok(result)
+#[cfg(test)]
+mod tests {
+    use super::Chunker;
+
+    #[test]
+    fn split_sentences_finds_markdown_boundaries() {
+        let text = "# Intro\n\
+Some setup text without punctuation\n\
+- first bullet has words\n\
+- second bullet has words\n\n\
+## Next\n\
+1. numbered item\n\
+> quoted item";
+
+        let sentences = Chunker::split_sentences(text);
+        let parts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
+
+        assert!(parts.len() > 1, "markdown should split into multiple units");
+        assert!(parts.iter().any(|part| part.starts_with("# Intro")));
+        assert!(parts.iter().any(|part| part.starts_with("- first")));
+        assert!(parts.iter().any(|part| part.starts_with("## Next")));
+        assert!(parts.iter().any(|part| part.starts_with("1.")));
+    }
+
+    #[test]
+    fn greedy_sentence_windows_split_markdown_by_size() {
+        let text = "# Intro\n\
+alpha beta gamma delta\n\
+- epsilon zeta eta theta\n\
+- iota kappa lambda mu\n\
+## Next\n\
+nu xi omicron pi";
+        let sentences = Chunker::split_sentences(text);
+
+        let chunks = Chunker::sentence_text_windows(&sentences, 8, |text| {
+            text.split_whitespace().count()
+        });
+
+        assert!(
+            chunks.len() > 1,
+            "markdown headers and bullets should produce more than one chunk"
+        );
+    }
+
+    #[test]
+    fn word_windows_split_text_without_sentence_boundaries() {
+        let text = "one two three four five six seven eight nine ten";
+        let chunks = Chunker::word_text_windows(text, 4);
+
+        assert_eq!(chunks, vec!["one two three four", "five six seven eight", "nine ten"]);
     }
 }

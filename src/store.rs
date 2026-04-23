@@ -382,7 +382,7 @@ mod tests {
             make_chunk("c2", vec![0.0, 1.0], Some(vec![0.5, 0.5])),
         ];
 
-        store.add_chunks("session1", chunks).unwrap();
+        store.add_chunks("session1", chunks, None).unwrap();
 
         let retrieved = store.get_chunks("session1").unwrap();
         assert_eq!(retrieved.len(), 2);
@@ -396,10 +396,10 @@ mod tests {
     fn session_meta_tracks_chunks() {
         let store = make_store();
         store
-            .add_chunks("s1", vec![make_chunk("c1", vec![1.0], None)])
+            .add_chunks("s1", vec![make_chunk("c1", vec![1.0], None)], None)
             .unwrap();
         store
-            .add_chunks("s1", vec![make_chunk("c2", vec![0.5], None)])
+            .add_chunks("s1", vec![make_chunk("c2", vec![0.5], None)], None)
             .unwrap();
 
         let meta = store.get_session_meta("s1").unwrap().unwrap();
@@ -417,6 +417,7 @@ mod tests {
                     make_chunk("c1", vec![1.0], None),
                     make_chunk("c2", vec![0.5], None),
                 ],
+                None,
             )
             .unwrap();
 
@@ -430,13 +431,13 @@ mod tests {
     fn list_sessions() {
         let store = make_store();
         store
-            .add_chunks("alpha", vec![make_chunk("c1", vec![1.0], None)])
+            .add_chunks("alpha", vec![make_chunk("c1", vec![1.0], None)], None)
             .unwrap();
         store
-            .add_chunks("beta", vec![make_chunk("c2", vec![0.5], None)])
+            .add_chunks("beta", vec![make_chunk("c2", vec![0.5], None)], None)
             .unwrap();
 
-        let sessions = store.list_sessions().unwrap();
+        let sessions = store.list_sessions(None).unwrap();
         assert_eq!(sessions.len(), 2);
     }
 
@@ -451,7 +452,7 @@ mod tests {
             make_chunk("partial", l2_normalize(&[0.7, 0.7, 0.0, 0.0]), None),
             make_chunk("orthogonal", l2_normalize(&[0.0, 0.0, 1.0, 0.0]), None),
         ];
-        store.add_chunks("s1", chunks).unwrap();
+        store.add_chunks("s1", chunks, None).unwrap();
 
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
         let results = store.search("s1", &query, 3, None, 168.0, "organize").unwrap();
@@ -479,7 +480,7 @@ mod tests {
                 Some(l2_normalize(&[1.0, 0.0, 0.0, 0.0])),
             ),
         ];
-        store.add_chunks("s1", chunks).unwrap();
+        store.add_chunks("s1", chunks, None).unwrap();
 
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
 
@@ -498,7 +499,7 @@ mod tests {
             make_chunk("c1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]), None),
             make_chunk("c2", l2_normalize(&[0.0, 1.0, 0.0, 0.0]), None),
         ];
-        store.add_chunks("s1", chunks).unwrap();
+        store.add_chunks("s1", chunks, None).unwrap();
 
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
         let results = store.search("s1", &query, 2, None, 168.0, "retrieve").unwrap();
@@ -521,7 +522,7 @@ mod tests {
             make_chunk("c1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]), None),
             make_chunk("c2", l2_normalize(&[0.9, 0.1, 0.0, 0.0]), None),
         ];
-        store.add_chunks("s1", chunks).unwrap();
+        store.add_chunks("s1", chunks, None).unwrap();
 
         let query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
         let results = store
@@ -542,7 +543,7 @@ mod tests {
         chunk.encrypted = true;
         chunk.agent_id = Some("vajrayaksa".to_string());
 
-        store.add_chunks("s1", vec![chunk]).unwrap();
+        store.add_chunks("s1", vec![chunk], None).unwrap();
 
         let retrieved = store.get_chunks("s1").unwrap();
         assert_eq!(retrieved.len(), 1);

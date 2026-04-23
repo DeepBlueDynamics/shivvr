@@ -72,7 +72,7 @@ fn store_ingest_search_top_result() {
         make_chunk("south", l2_normalize(&[0.0, 0.0, 1.0, 0.0])),
         make_chunk("west", l2_normalize(&[0.0, 0.0, 0.0, 1.0])),
     ];
-    store.add_chunks("sess", chunks).unwrap();
+    store.add_chunks("sess", chunks, None).unwrap();
 
     // Query aligned with "east"
     let query = l2_normalize(&[0.0, 1.0, 0.0, 0.0]);
@@ -103,7 +103,7 @@ fn store_ingest_returns_n_results() {
             make_chunk(&format!("c{}", i), v)
         })
         .collect();
-    store.add_chunks("large", chunks).unwrap();
+    store.add_chunks("large", chunks, None).unwrap();
 
     let query = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let results = store.search("large", &query, 3, None, 168.0, "organize").unwrap();
@@ -117,10 +117,18 @@ fn store_session_isolation() {
     let store = Store::new();
 
     store
-        .add_chunks("alpha", vec![make_chunk("a1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]))])
+        .add_chunks(
+            "alpha",
+            vec![make_chunk("a1", l2_normalize(&[1.0, 0.0, 0.0, 0.0]))],
+            None,
+        )
         .unwrap();
     store
-        .add_chunks("beta", vec![make_chunk("b1", l2_normalize(&[0.0, 1.0, 0.0, 0.0]))])
+        .add_chunks(
+            "beta",
+            vec![make_chunk("b1", l2_normalize(&[0.0, 1.0, 0.0, 0.0]))],
+            None,
+        )
         .unwrap();
 
     // alpha session should not see beta's chunk
@@ -145,6 +153,7 @@ fn store_delete_session_clears_state() {
                 make_chunk("c1", l2_normalize(&[1.0, 0.0])),
                 make_chunk("c2", l2_normalize(&[0.0, 1.0])),
             ],
+            None,
         )
         .unwrap();
 
@@ -169,7 +178,7 @@ fn store_retrieve_role_uses_separate_embedding() {
 
     let mut chunk = make_chunk("dual", l2_normalize(&[1.0, 0.0, 0.0, 0.0]));
     chunk.embedding_retrieve = Some(l2_normalize(&[0.0, 1.0, 0.0, 0.0]));
-    store.add_chunks("s", vec![chunk]).unwrap();
+    store.add_chunks("s", vec![chunk], None).unwrap();
 
     let query_organize = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
     let query_retrieve = l2_normalize(&[0.0, 1.0, 0.0, 0.0]);
@@ -260,7 +269,7 @@ fn crypto_encrypted_chunks_preserve_search_ranking() {
     c2.encrypted = true;
     c2.agent_id = Some("agent-x".to_string());
 
-    store.add_chunks("enc-session", vec![c1, c2]).unwrap();
+    store.add_chunks("enc-session", vec![c1, c2], None).unwrap();
 
     // Encrypt the query too
     let plain_query = l2_normalize(&[1.0, 0.0, 0.0, 0.0]);
@@ -323,14 +332,15 @@ fn store_total_chunks_across_sessions() {
                 make_chunk("a", vec![1.0, 0.0]),
                 make_chunk("b", vec![0.0, 1.0]),
             ],
+            None,
         )
         .unwrap();
     store
-        .add_chunks("s2", vec![make_chunk("c", vec![0.5, 0.5])])
+        .add_chunks("s2", vec![make_chunk("c", vec![0.5, 0.5])], None)
         .unwrap();
 
     assert_eq!(store.total_chunks().unwrap(), 3);
 
-    let sessions = store.list_sessions().unwrap();
+    let sessions = store.list_sessions(None).unwrap();
     assert_eq!(sessions.len(), 2);
 }
