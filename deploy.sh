@@ -27,6 +27,8 @@ gcloud builds submit \
   .
 
 echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU)..."
+# NUTS_AUTH_JWKS_URL turns on the auth gate. Without it shivvr boots in
+# "dev mode" with all endpoints public — fine locally, dangerous in prod.
 gcloud run deploy "${SERVICE}" \
   --image "${IMAGE}:latest" \
   --region "${REGION}" \
@@ -42,7 +44,8 @@ gcloud run deploy "${SERVICE}" \
   --concurrency 4 \
   --execution-environment gen2 \
   --no-gpu-zonal-redundancy \
-  --port 8080
+  --port 8080 \
+  --set-env-vars "NUTS_AUTH_JWKS_URL=https://auth.nuts.services/.well-known/jwks.json,NUTS_AUTH_VALIDATE_URL=https://auth.nuts.services/api/validate"
 
 echo ""
 echo "==> Service URL:"
