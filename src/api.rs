@@ -52,6 +52,12 @@ pub struct IngestRequest {
     pub agent_id: Option<String>,
     /// Caller-supplied OpenAI API key — enables retrieve embedding without server key
     pub openai_api_key: Option<String>,
+    /// If true, mean-pool all chunk embeddings into a single normalized vector.
+    /// Returns one IngestChunk regardless of how many internal chunks were produced.
+    /// Use this for sliding-window / bhavanga context embeddings where the caller
+    /// wants one vector representing the whole input window.
+    #[serde(default)]
+    pub mean_pool: bool,
 }
 
 #[derive(Serialize)]
@@ -80,7 +86,10 @@ pub struct IngestChunk {
 #[derive(Deserialize)]
 pub struct SearchQuery {
     pub q: String,
-    #[serde(default = "default_n")]
+    /// Number of results to return. Accepts `limit` as an alias —
+    /// qdrant/weaviate/milvus/chroma all use `limit`, so clients coming
+    /// from those reach for it first. `n` remains canonical.
+    #[serde(default = "default_n", alias = "limit")]
     pub n: usize,
     #[serde(default)]
     pub time_weight: Option<f32>,
@@ -410,19 +419,61 @@ pub async fn temp_ingest(
     let chunks_created = chunks.len();
     let tokens_processed: usize = chunks.iter().map(|c| c.token_count).sum();
 
-    let response_chunks: Vec<IngestChunk> = chunks
-        .iter()
-        .map(|c| IngestChunk {
-            chunk_id: c.id.clone(),
-            text: c.text.clone(),
-            embedding: c.embedding.clone(),
-            embedding_retrieve: c.embedding_retrieve.clone(),
-            token_count: c.token_count,
-            source: c.source.clone(),
-            emotion_primary: c.emotion_primary.clone(),
-            emotion_secondary: c.emotion_secondary.clone(),
-        })
-        .collect();
+    // Mean-pool: collapse all chunk embeddings into one normalized vector.
+    let response_chunks: Vec<IngestChunk> = if req.mean_pool && !chunks.is_empty() {
+        let dim = chunks[0].embedding.len();
+        let mut pooled = vec![0.0f32; dim];
+        for chunk in &chunks {
+            for (p, v) in pooled.iter_mut().zip(&chunk.embedding) {
+                *p += v;
+            }
+        }
+        let n = chunks.len() as f32;
+        for p in &mut pooled { *p /= n; }
+        let norm = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm > 0.0 { for p in &mut pooled { *p /= norm; } }
+
+        let pooled_retrieve = if chunks.iter().all(|c| c.embedding_retrieve.is_some()) {
+            let rdim = chunks[0].embedding_retrieve.as_ref().unwrap().len();
+            let mut rp = vec![0.0f32; rdim];
+            for chunk in &chunks {
+                for (p, v) in rp.iter_mut().zip(chunk.embedding_retrieve.as_ref().unwrap()) {
+                    *p += v;
+                }
+            }
+            for p in &mut rp { *p /= n; }
+            let rnorm = rp.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if rnorm > 0.0 { for p in &mut rp { *p /= rnorm; } }
+            Some(rp)
+        } else {
+            None
+        };
+
+        vec![IngestChunk {
+            chunk_id: chunks[0].id.clone(),
+            text: req.text.clone(),
+            embedding: pooled,
+            embedding_retrieve: pooled_retrieve,
+            token_count: tokens_processed,
+            source: chunks[0].source.clone(),
+            emotion_primary: emotion_primary.clone(),
+            emotion_secondary: emotion_secondary.clone(),
+        }]
+    } else {
+        chunks
+            .iter()
+            .map(|c| IngestChunk {
+                chunk_id: c.id.clone(),
+                text: c.text.clone(),
+                embedding: c.embedding.clone(),
+                embedding_retrieve: c.embedding_retrieve.clone(),
+                token_count: c.token_count,
+                source: c.source.clone(),
+                emotion_primary: c.emotion_primary.clone(),
+                emotion_secondary: c.emotion_secondary.clone(),
+            })
+            .collect()
+    };
 
     state.temp_store.add_chunks(&name, chunks).map_err(|e| {
         (
