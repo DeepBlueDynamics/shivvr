@@ -1847,7 +1847,11 @@ async fn process_mcp_request(
                 },
                 "serverInfo": {
                     "name": "shivvr-mcp",
-                    "version": "0.2.0"
+                    // Single source of truth: Cargo.toml [package].version.
+                    // Health endpoint (line ~1048) and homepage (line ~1240)
+                    // already read it the same way. To rev, bump Cargo.toml
+                    // and re-deploy — nothing else needs editing.
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }))
         }
