@@ -17,6 +17,7 @@ pub struct TempStoreMeta {
 
 struct TempSession {
     chunks: Vec<Chunk>,
+    bm25_index: Option<lume_hybrid::bm25::Bm25Index>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 }
@@ -39,12 +40,27 @@ impl TempStore {
         let mut stores = self.stores.write().unwrap();
         let session = stores.entry(name.to_string()).or_insert_with(|| TempSession {
             chunks: Vec::new(),
+            bm25_index: None,
             created_at: now,
             expires_at,
         });
 
         session.chunks.extend(chunks);
         session.expires_at = expires_at;
+
+        // Rebuild the local BM25 index with the combined session chunks. See
+        // store.rs for the same pattern + Section/Tagger explanation.
+        let sections: Vec<lume_hybrid::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
+            lume_hybrid::bm25::Section {
+                title: c.source.clone().unwrap_or_else(|| c.id.clone()),
+                body: c.text.clone(),
+                line_number: i,
+                filename: c.source.clone(),
+                entities: Vec::new(),
+            }
+        }).collect();
+        session.bm25_index = Some(lume_hybrid::bm25::Bm25Index::build(sections, None));
+
         Ok(())
     }
 
@@ -123,6 +139,108 @@ impl TempStore {
         scores.truncate(n);
 
         Ok(scores
+            .into_iter()
+            .map(|(i, score)| (chunks[i].clone(), score))
+            .collect())
+    }
+
+    /// Search hybrid combining semantic vector search and BM25F lexical search with RRF & FST boosts
+    pub fn search_hybrid(
+        &self,
+        name: &str,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        n: usize,
+        time_weight: Option<f32>,
+        decay_halflife_hours: f32,
+        role: &str,
+        tags: &[lume_hybrid::Tag],
+        _params: &lume_hybrid::bm25::Bm25Params,
+    ) -> Result<Vec<(Chunk, f32)>> {
+        let chunks = self.get_chunks(name)?;
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Compute Semantic Scores (if embedding is available)
+        let mut vector_ranks: HashMap<String, usize> = HashMap::new();
+        let mut vector_scores: HashMap<String, f32> = HashMap::new();
+
+        if let Some(emb) = query_embedding {
+            let semantic_hits = self.search(
+                name,
+                emb,
+                chunks.len(),
+                time_weight,
+                decay_halflife_hours,
+                role,
+            )?;
+            for (rank, (chunk, score)) in semantic_hits.into_iter().enumerate() {
+                vector_ranks.insert(chunk.id.clone(), rank);
+                vector_scores.insert(chunk.id.clone(), score);
+            }
+        }
+
+        // 2. Compute Lexical BM25 Scores
+        let mut lexical_ranks: HashMap<String, usize> = HashMap::new();
+        let mut lexical_scores: HashMap<String, f32> = HashMap::new();
+
+        let stores = self.stores.read().unwrap();
+        let session = stores.get(name);
+        if let Some(s) = session {
+            if let Some(ref idx) = s.bm25_index {
+                // See store.rs for why we use Bm25Index::search instead of the
+                // old manual postings iteration.
+                let hits = idx.search(
+                    query,
+                    lume_hybrid::bm25::SearchVariant::Classic,
+                    _params,
+                    None,
+                );
+
+                for (rank, hit) in hits.iter().enumerate() {
+                    if hit.section_index < s.chunks.len() {
+                        let chunk_id = &s.chunks[hit.section_index].id;
+                        lexical_ranks.insert(chunk_id.clone(), rank);
+                        lexical_scores.insert(chunk_id.clone(), hit.score as f32);
+                    }
+                }
+            }
+        }
+
+        // 3. Reciprocal Rank Fusion (RRF) & FST Intent Boosting
+        let k = 60.0f32; // RRF parameter
+        let mut final_scores: Vec<(usize, f32)> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let chunk_id = &chunk.id;
+                let rrf_sem = vector_ranks.get(chunk_id)
+                    .map(|&rank| 1.0 / (k + rank as f32))
+                    .unwrap_or(0.0);
+                let rrf_lex = lexical_ranks.get(chunk_id)
+                    .map(|&rank| 1.0 / (k + rank as f32))
+                    .unwrap_or(0.0);
+                let mut combined_score = rrf_sem + rrf_lex;
+
+                // FST dynamic intent boosting
+                let normalized_text = chunk.text.to_lowercase();
+                for tag in tags {
+                    let surface_matched = normalized_text.contains(&tag.surface.to_lowercase());
+                    let output_matched = normalized_text.contains(&tag.output.to_lowercase());
+                    if surface_matched || output_matched {
+                        combined_score += 0.05f32; // Boost rank dynamically in the RRF domain
+                    }
+                }
+
+                (i, combined_score)
+            })
+            .collect();
+
+        final_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        final_scores.truncate(n);
+
+        Ok(final_scores
             .into_iter()
             .map(|(i, score)| (chunks[i].clone(), score))
             .collect())

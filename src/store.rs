@@ -42,6 +42,7 @@ pub struct SessionMeta {
 
 struct Session {
     chunks: Vec<Chunk>,
+    bm25_index: Option<lume_hybrid::bm25::Bm25Index>,
     created_at: DateTime<Utc>,
     last_ingested: DateTime<Utc>,
     total_tokens: usize,
@@ -71,6 +72,7 @@ impl Store {
         let mut sessions = self.sessions.write().unwrap();
         let session = sessions.entry(session_id.to_string()).or_insert_with(|| Session {
             chunks: Vec::new(),
+            bm25_index: None,
             created_at: now,
             last_ingested: now,
             total_tokens: 0,
@@ -80,6 +82,22 @@ impl Store {
         session.chunks.extend(chunks);
         session.total_tokens += tokens;
         session.last_ingested = now;
+
+        // Rebuild the local BM25 index with the combined session chunks.
+        // Lume's Section carries line_number / filename / entities fields we
+        // don't use here — zero them out. Bm25Index::build takes Option<&Tagger>
+        // for FST intent-boosting; we don't use that path in the BM25-only flow,
+        // so pass None.
+        let sections: Vec<lume_hybrid::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
+            lume_hybrid::bm25::Section {
+                title: c.source.clone().unwrap_or_else(|| c.id.clone()),
+                body: c.text.clone(),
+                line_number: i,
+                filename: c.source.clone(),
+                entities: Vec::new(),
+            }
+        }).collect();
+        session.bm25_index = Some(lume_hybrid::bm25::Bm25Index::build(sections, None));
 
         Ok(())
     }
@@ -208,6 +226,109 @@ impl Store {
         scores.truncate(n);
 
         Ok(scores
+            .into_iter()
+            .map(|(i, score)| (chunks[i].clone(), score))
+            .collect())
+    }
+
+    /// Search hybrid combining semantic vector search and BM25F lexical search with RRF & FST boosts
+    pub fn search_hybrid(
+        &self,
+        session_id: &str,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        n: usize,
+        time_weight: Option<f32>,
+        decay_halflife_hours: f32,
+        role: &str,
+        tags: &[lume_hybrid::Tag],
+        _params: &lume_hybrid::bm25::Bm25Params,
+    ) -> Result<Vec<(Chunk, f32)>> {
+        let chunks = self.get_chunks(session_id)?;
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Compute Semantic Scores (if embedding is available)
+        let mut vector_ranks: HashMap<String, usize> = HashMap::new();
+        let mut vector_scores: HashMap<String, f32> = HashMap::new();
+
+        if let Some(emb) = query_embedding {
+            let semantic_hits = self.search(
+                session_id,
+                emb,
+                chunks.len(),
+                time_weight,
+                decay_halflife_hours,
+                role,
+            )?;
+            for (rank, (chunk, score)) in semantic_hits.into_iter().enumerate() {
+                vector_ranks.insert(chunk.id.clone(), rank);
+                vector_scores.insert(chunk.id.clone(), score);
+            }
+        }
+
+        // 2. Compute Lexical BM25 Scores
+        let mut lexical_ranks: HashMap<String, usize> = HashMap::new();
+        let mut lexical_scores: HashMap<String, f32> = HashMap::new();
+
+        let sessions = self.sessions.read().unwrap();
+        let session = sessions.get(session_id);
+        if let Some(s) = session {
+            if let Some(ref idx) = s.bm25_index {
+                // Lume's Bm25Index::search runs the full BM25 pipeline (tokenize,
+                // posting-list lookups, scoring) and returns sorted hits. Replaces
+                // the old manual `postings` iteration that touched the now-private
+                // internals of rust-hybrid-search.
+                let hits = idx.search(
+                    query,
+                    lume_hybrid::bm25::SearchVariant::Classic,
+                    _params,
+                    None,
+                );
+                for (rank, hit) in hits.iter().enumerate() {
+                    if hit.section_index < s.chunks.len() {
+                        let chunk_id = &s.chunks[hit.section_index].id;
+                        lexical_ranks.insert(chunk_id.clone(), rank);
+                        lexical_scores.insert(chunk_id.clone(), hit.score as f32);
+                    }
+                }
+            }
+        }
+
+        // 3. Reciprocal Rank Fusion (RRF) & FST Intent Boosting
+        let k = 60.0f32; // RRF parameter
+        let mut final_scores: Vec<(usize, f32)> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let chunk_id = &chunk.id;
+                let rrf_sem = vector_ranks.get(chunk_id)
+                    .map(|&rank| 1.0 / (k + rank as f32))
+                    .unwrap_or(0.0);
+                let rrf_lex = lexical_ranks.get(chunk_id)
+                    .map(|&rank| 1.0 / (k + rank as f32))
+                    .unwrap_or(0.0);
+                let mut combined_score = rrf_sem + rrf_lex;
+
+                // FST dynamic intent boosting
+                let normalized_text = chunk.text.to_lowercase();
+                for tag in tags {
+                    let surface_matched = normalized_text.contains(&tag.surface.to_lowercase());
+                    let output_matched = normalized_text.contains(&tag.output.to_lowercase());
+                    if surface_matched || output_matched {
+                        combined_score += 0.05f32; // Boost rank dynamically in the RRF domain
+                    }
+                }
+
+                (i, combined_score)
+            })
+            .collect();
+
+        final_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        final_scores.truncate(n);
+
+        Ok(final_scores
             .into_iter()
             .map(|(i, score)| (chunks[i].clone(), score))
             .collect())
@@ -550,4 +671,46 @@ mod tests {
         assert!(retrieved[0].encrypted);
         assert_eq!(retrieved[0].agent_id.as_deref(), Some("vajrayaksa"));
     }
+
+    #[test]
+    fn search_hybrid_rrf_and_intent_boost() {
+        let store = make_store();
+
+        let mut chunk1 = make_chunk("c1", vec![1.0, 0.0], None);
+        chunk1.text = "This document is about DirectX rendering and graphics".to_string();
+        chunk1.source = Some("GraphicsGuide".to_string());
+
+        let mut chunk2 = make_chunk("c2", vec![0.0, 1.0], None);
+        chunk2.text = "Database storage systems and SQL query engines".to_string();
+        chunk2.source = Some("DBGuide".to_string());
+
+        store.add_chunks("s1", vec![chunk1, chunk2], None).unwrap();
+
+        let tags = vec![lume_hybrid::Tag {
+            start: 0,
+            end: 7,
+            surface: "DirectX".to_string(),
+            id: "1".to_string(),
+            kind: "intent".to_string(),
+            output: "BOOST_GRAPHICS".to_string(),
+        }];
+        let results = store
+            .search_hybrid(
+                "s1",
+                "DirectX",
+                Some(&[1.0, 0.0]),
+                2,
+                None,
+                168.0,
+                "organize",
+                &tags,
+                &lume_hybrid::bm25::Bm25Params::default(),
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.id, "c1");
+        assert!(results[0].1 > 0.0);
+    }
 }
+

@@ -14,7 +14,11 @@ RUN apt-get update && apt-get install -y \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
+
+# Vendor sub-crate (lume-hybrid) comes in with the rest of the source tree —
+# Cargo's `path = "vendor/lume-hybrid"` resolves inside /app/vendor/.
 COPY Cargo.toml ./
+COPY vendor ./vendor
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release --features cuda || true
 RUN rm -rf src
@@ -22,6 +26,7 @@ RUN rm -rf src
 COPY src ./src
 RUN touch src/main.rs
 RUN cargo build --release --features cuda
+
 
 RUN mkdir -p /ort-libs && \
     find /root/.cache/ort.pyke.io/dfbin -name "libonnxruntime*.so*" -exec cp {} /ort-libs/ \;

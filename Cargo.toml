@@ -13,6 +13,8 @@ cuda = ["ort/cuda"]
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
 
 # HTTP
 axum = "0.7"
@@ -41,6 +43,7 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+lume-hybrid = { path = "vendor/lume-hybrid" }
 
 [package.metadata.dist]
 dist = false

@@ -2,14 +2,13 @@ services:
   shivvr:
     build: .
     ports:
-      - "8080:8080"
+      - "8085:8080"
     environment:
       - PORT=8080
       - MODEL_PATH=/models/gtr-t5-base.onnx
       - TOKENIZER_PATH=/models/tokenizer.json
       - LD_LIBRARY_PATH=/usr/lib/onnxruntime
-      # Optional: set OPENAI_API_KEY at runtime to enable retrieve embeddings
-      # - OPENAI_API_KEY=
+      - OPENAI_API_KEY
       # Optional: set NUTS_AUTH_JWKS_URL to enable authentication
       # - NUTS_AUTH_JWKS_URL=
     restart: unless-stopped

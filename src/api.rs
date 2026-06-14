@@ -15,7 +15,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::sync::Arc;
 
 pub struct AppState {
@@ -29,6 +29,12 @@ pub struct AppState {
     pub start_time: std::time::Instant,
     pub nuts_auth: Option<Arc<NutsAuth>>,
     pub openai_auth_required: bool,
+    pub guardrail_tagger: Arc<std::sync::RwLock<lume_hybrid::Tagger>>,
+    /// BM25 tuning params (k1/b/delta/title_weight/body_weight). Lume's
+    /// successor to the old SearchConfig — variant + tagger get selected
+    /// per call rather than living on the global config.
+    pub search_params: lume_hybrid::bm25::Bm25Params,
+    pub mcp_connections: Arc<tokio::sync::RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Result<axum::response::sse::Event, std::convert::Infallible>>>>>,
 }
 
 // ===== Request/Response Types =====
@@ -93,6 +99,18 @@ pub struct SearchQuery {
     pub agent_id: Option<String>,
     /// Caller-supplied OpenAI API key — enables retrieve role without server key
     pub openai_api_key: Option<String>,
+    
+    // NEW FIELDS
+    #[serde(default)]
+    pub hybrid: Option<bool>,
+    #[serde(default)]
+    pub lexical_only: Option<bool>,
+    #[serde(default = "default_true")]
+    pub guardrail: Option<bool>,
+}
+
+fn default_true() -> Option<bool> {
+    Some(true)
 }
 
 fn default_n() -> usize {
@@ -437,64 +455,89 @@ pub async fn search(
         return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "session not found".to_string() })));
     }
 
-    // Resolve OpenAI embedder: prefer caller-supplied key, fall back to server key
-    let openai_for_request = query.openai_api_key
-        .as_deref()
-        .map(|k| crate::openai::OpenAIEmbedder::new(k.to_string()))
-        .transpose()
-        .ok()
-        .flatten()
-        .map(Arc::new);
-    let effective_openai = openai_for_request.as_ref().or(state.openai_embedder.as_ref());
-
-    // Reject retrieve role early if no OpenAI embedder available from any source
-    if role == "retrieve" && effective_openai.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "role=retrieve requires an OpenAI API key (set OPENAI_API_KEY or pass openai_api_key in the request)".to_string(),
-            }),
-        ));
-    }
-
-    // Embed query with the appropriate model for the role
-    let mut query_embedding = if role == "retrieve" {
-        let openai = effective_openai.as_ref().expect("checked above");
-        openai.embed(&query.q).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+    // 1. Run FST Tagger Guardrail
+    let tags = state.guardrail_tagger.read().unwrap().tag(&query.q);
+    if query.guardrail.unwrap_or(true) {
+        let blocked_terms: Vec<String> = tags
+            .iter()
+            .filter(|t| t.kind.contains("offensive") || t.output == "BLOCK")
+            .map(|t| t.surface.clone())
+            .collect();
+        if !blocked_terms.is_empty() {
+            return Err((
+                StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: format!("OpenAI embed failed: {}", e),
+                    error: format!("Query blocked by safety guardrail. Blocked terms: {:?}", blocked_terms),
                 }),
-            )
-        })?
-    } else {
-        state.embedder.embed(&query.q).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-    };
-
-    // Encrypt query embedding if agent_id provided
-    if let Some(ref aid) = query.agent_id {
-        if let Some(keys) = state.crypto.get_keys(aid) {
-            query_embedding = keys.encrypt(&query_embedding, role);
+            ));
         }
     }
 
-    let results = if query.include_nearby.unwrap_or(false) {
-        let results_with_context = state
+    // 2. Generate Query Embedding (unless lexical-only requested)
+    let query_embedding = if query.lexical_only.unwrap_or(false) {
+        None
+    } else {
+        let openai_for_request = query.openai_api_key
+            .as_deref()
+            .map(|k| crate::openai::OpenAIEmbedder::new(k.to_string()))
+            .transpose()
+            .ok()
+            .flatten()
+            .map(Arc::new);
+        let effective_openai = openai_for_request.as_ref().or(state.openai_embedder.as_ref());
+
+        if role == "retrieve" && effective_openai.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "role=retrieve requires an OpenAI API key (set OPENAI_API_KEY or pass openai_api_key in the request)".to_string(),
+                }),
+            ));
+        }
+
+        let mut emb = if role == "retrieve" {
+            let openai = effective_openai.as_ref().expect("checked above");
+            openai.embed(&query.q).await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("OpenAI embed failed: {}", e),
+                    }),
+                )
+            })?
+        } else {
+            state.embedder.embed(&query.q).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?
+        };
+
+        if let Some(ref aid) = query.agent_id {
+            if let Some(keys) = state.crypto.get_keys(aid) {
+                emb = keys.encrypt(&emb, role);
+            }
+        }
+        Some(emb)
+    };
+
+    // 3. Routing & Execution
+    let results = if query.hybrid.unwrap_or(false) || query.lexical_only.unwrap_or(false) {
+        let raw_results = state
             .store
-            .search_with_temporal_context(
+            .search_hybrid(
                 &session_id,
-                &query_embedding,
+                &query.q,
+                query_embedding.as_deref(),
                 query.n,
-                query.time_window_minutes,
+                query.time_weight,
+                query.decay_halflife_hours,
                 role,
+                &tags,
+                &state.search_params,
             )
             .map_err(|e| {
                 (
@@ -505,44 +548,7 @@ pub async fn search(
                 )
             })?;
 
-        results_with_context
-            .into_iter()
-            .map(|(chunk, score, nearby)| SearchResult {
-                chunk_id: chunk.id,
-                score,
-                text: chunk.text,
-                source: chunk.source,
-                metadata: chunk.metadata,
-                created_at: chunk.created_at.to_rfc3339(),
-                emotion_primary: chunk.emotion_primary,
-                emotion_secondary: chunk.emotion_secondary,
-                nearby_chunks: Some(
-                    nearby
-                        .into_iter()
-                        .map(|c| NearbyChunk {
-                            chunk_id: c.id,
-                            text: c.text,
-                            source: c.source,
-                            created_at: c.created_at.to_rfc3339(),
-                        })
-                        .collect(),
-                ),
-            })
-            .collect()
-    } else {
-        let results = state
-            .store
-            .search(&session_id, &query_embedding, query.n, query.time_weight, query.decay_halflife_hours, role)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?;
-
-        results
+        raw_results
             .into_iter()
             .map(|(chunk, score)| SearchResult {
                 chunk_id: chunk.id,
@@ -556,6 +562,79 @@ pub async fn search(
                 nearby_chunks: None,
             })
             .collect()
+    } else {
+        let emb = query_embedding.as_ref().unwrap();
+        if query.include_nearby.unwrap_or(false) {
+            let results_with_context = state
+                .store
+                .search_with_temporal_context(
+                    &session_id,
+                    emb,
+                    query.n,
+                    query.time_window_minutes,
+                    role,
+                )
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?;
+
+            results_with_context
+                .into_iter()
+                .map(|(chunk, score, nearby)| SearchResult {
+                    chunk_id: chunk.id,
+                    score,
+                    text: chunk.text,
+                    source: chunk.source,
+                    metadata: chunk.metadata,
+                    created_at: chunk.created_at.to_rfc3339(),
+                    emotion_primary: chunk.emotion_primary,
+                    emotion_secondary: chunk.emotion_secondary,
+                    nearby_chunks: Some(
+                        nearby
+                            .into_iter()
+                            .map(|c| NearbyChunk {
+                                chunk_id: c.id,
+                                text: c.text,
+                                source: c.source,
+                                created_at: c.created_at.to_rfc3339(),
+                            })
+                            .collect(),
+                    ),
+                })
+                .collect()
+        } else {
+            let results = state
+                .store
+                .search(&session_id, emb, query.n, query.time_weight, query.decay_halflife_hours, role)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?;
+
+            results
+                .into_iter()
+                .map(|(chunk, score)| SearchResult {
+                    chunk_id: chunk.id,
+                    score,
+                    text: chunk.text,
+                    source: chunk.source,
+                    metadata: chunk.metadata,
+                    created_at: chunk.created_at.to_rfc3339(),
+                    emotion_primary: chunk.emotion_primary,
+                    emotion_secondary: chunk.emotion_secondary,
+                    nearby_chunks: None,
+                })
+                .collect()
+        }
     };
 
     Ok(Json(SearchResponse {
@@ -573,95 +652,80 @@ pub async fn temp_search(
     let start = std::time::Instant::now();
     let role = &query.role;
 
-    if role == "retrieve" && state.openai_embedder.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "role=retrieve requires OPENAI embedder configuration".to_string(),
-            }),
-        ));
-    }
-
-    let mut query_embedding = if role == "retrieve" {
-        let openai = state.openai_embedder.as_ref().expect("checked above");
-        openai.embed(&query.q).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+    // 1. Run FST Tagger Guardrail
+    let tags = state.guardrail_tagger.read().unwrap().tag(&query.q);
+    if query.guardrail.unwrap_or(true) {
+        let blocked_terms: Vec<String> = tags
+            .iter()
+            .filter(|t| t.kind.contains("offensive") || t.output == "BLOCK")
+            .map(|t| t.surface.clone())
+            .collect();
+        if !blocked_terms.is_empty() {
+            return Err((
+                StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: format!("OpenAI embed failed: {}", e),
+                    error: format!("Query blocked by safety guardrail. Blocked terms: {:?}", blocked_terms),
                 }),
-            )
-        })?
-    } else {
-        state.embedder.embed(&query.q).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-    };
-
-    if let Some(ref aid) = query.agent_id {
-        if let Some(keys) = state.crypto.get_keys(aid) {
-            query_embedding = keys.encrypt(&query_embedding, role);
+            ));
         }
     }
 
-    let results = if query.include_nearby.unwrap_or(false) {
-        let results_with_context = state
-            .temp_store
-            .search_with_temporal_context(
-                &name,
-                &query_embedding,
-                query.n,
-                query.time_window_minutes,
-                role,
-            )
-            .map_err(|e| {
+    // 2. Generate Query Embedding (unless lexical-only requested)
+    let query_embedding = if query.lexical_only.unwrap_or(false) {
+        None
+    } else {
+        if role == "retrieve" && state.openai_embedder.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "role=retrieve requires OPENAI embedder configuration".to_string(),
+                }),
+            ));
+        }
+
+        let mut emb = if role == "retrieve" {
+            let openai = state.openai_embedder.as_ref().expect("checked above");
+            openai.embed(&query.q).await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("OpenAI embed failed: {}", e),
+                    }),
+                )
+            })?
+        } else {
+            state.embedder.embed(&query.q).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: e.to_string(),
                     }),
                 )
-            })?;
+            })?
+        };
 
-        results_with_context
-            .into_iter()
-            .map(|(chunk, score, nearby)| SearchResult {
-                chunk_id: chunk.id,
-                score,
-                text: chunk.text,
-                source: chunk.source,
-                metadata: chunk.metadata,
-                created_at: chunk.created_at.to_rfc3339(),
-                emotion_primary: chunk.emotion_primary,
-                emotion_secondary: chunk.emotion_secondary,
-                nearby_chunks: Some(
-                    nearby
-                        .into_iter()
-                        .map(|c| NearbyChunk {
-                            chunk_id: c.id,
-                            text: c.text,
-                            source: c.source,
-                            created_at: c.created_at.to_rfc3339(),
-                        })
-                        .collect(),
-                ),
-            })
-            .collect()
-    } else {
-        let results = state
+        if let Some(ref aid) = query.agent_id {
+            if let Some(keys) = state.crypto.get_keys(aid) {
+                emb = keys.encrypt(&emb, role);
+            }
+        }
+        Some(emb)
+    };
+
+    // 3. Routing & Execution
+    let results = if query.hybrid.unwrap_or(false) || query.lexical_only.unwrap_or(false) {
+        let raw_results = state
             .temp_store
-            .search(
+            .search_hybrid(
                 &name,
-                &query_embedding,
+                &query.q,
+                query_embedding.as_deref(),
                 query.n,
                 query.time_weight,
                 query.decay_halflife_hours,
                 role,
+                &tags,
+                &state.search_params,
             )
             .map_err(|e| {
                 (
@@ -672,7 +736,7 @@ pub async fn temp_search(
                 )
             })?;
 
-        results
+        raw_results
             .into_iter()
             .map(|(chunk, score)| SearchResult {
                 chunk_id: chunk.id,
@@ -686,6 +750,86 @@ pub async fn temp_search(
                 nearby_chunks: None,
             })
             .collect()
+    } else {
+        let emb = query_embedding.as_ref().unwrap();
+        if query.include_nearby.unwrap_or(false) {
+            let results_with_context = state
+                .temp_store
+                .search_with_temporal_context(
+                    &name,
+                    emb,
+                    query.n,
+                    query.time_window_minutes,
+                    role,
+                )
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?;
+
+            results_with_context
+                .into_iter()
+                .map(|(chunk, score, nearby)| SearchResult {
+                    chunk_id: chunk.id,
+                    score,
+                    text: chunk.text,
+                    source: chunk.source,
+                    metadata: chunk.metadata,
+                    created_at: chunk.created_at.to_rfc3339(),
+                    emotion_primary: chunk.emotion_primary,
+                    emotion_secondary: chunk.emotion_secondary,
+                    nearby_chunks: Some(
+                        nearby
+                            .into_iter()
+                            .map(|c| NearbyChunk {
+                                chunk_id: c.id,
+                                text: c.text,
+                                source: c.source,
+                                created_at: c.created_at.to_rfc3339(),
+                            })
+                            .collect(),
+                    ),
+                })
+                .collect()
+        } else {
+            let results = state
+                .temp_store
+                .search(
+                    &name,
+                    emb,
+                    query.n,
+                    query.time_weight,
+                    query.decay_halflife_hours,
+                    role,
+                )
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?;
+
+            results
+                .into_iter()
+                .map(|(chunk, score)| SearchResult {
+                    chunk_id: chunk.id,
+                    score,
+                    text: chunk.text,
+                    source: chunk.source,
+                    metadata: chunk.metadata,
+                    created_at: chunk.created_at.to_rfc3339(),
+                    emotion_primary: chunk.emotion_primary,
+                    emotion_secondary: chunk.emotion_secondary,
+                    nearby_chunks: None,
+                })
+                .collect()
+        }
     };
 
     Ok(Json(SearchResponse {
@@ -1049,20 +1193,20 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>shivvr — semantic embedding service</title>
+<title>shivvr — semantic embedding & cognitive agent service</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0a'/%3E%3Cpath d='M10 11 Q16 8 22 11 Q16 14 10 17 Q16 20 22 23' stroke='%2300c2a8' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<meta name="description" content="Ephemeral semantic embedding service. Chunk text, embed with GTR-T5-base (768d), search by cosine similarity. Rust + ONNX Runtime + GPU on Cloud Run.">
+<meta name="description" content="Ephemeral semantic embedding & cognitive agent service. Chunk text, embed with GTR-T5-base (768d), search with hybrid BM25 + FST routers, and run autonomous tool reasoning loops.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://shivvr.nuts.services">
-<meta property="og:title" content="shivvr — semantic embedding service">
-<meta property="og:description" content="Chunk. Embed. Search. Fully ephemeral. GTR-T5-base (768d) + ONNX Runtime on GPU. No disk. No state. Rust.">
+<meta property="og:title" content="shivvr — semantic embedding & cognitive agent service">
+<meta property="og:description" content="Chunk. Embed. Hybrid Search. Autonomous GhostAgent. Ephemeral RAG + MCP server. Rust + ONNX Runtime on GPU. No disk. No state.">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:site" content="@deepbluedynamic">
-<meta name="twitter:title" content="shivvr — semantic embedding service">
-<meta name="twitter:description" content="Chunk. Embed. Search. Fully ephemeral. GTR-T5-base (768d) + ONNX Runtime on GPU. No disk. No state. Rust.">
+<meta name="twitter:title" content="shivvr — semantic embedding & cognitive agent service">
+<meta name="twitter:description" content="Chunk. Embed. Hybrid Search. Autonomous GhostAgent. Ephemeral RAG + MCP server. Rust + ONNX Runtime on GPU. No disk. No state.">
 <style>
   :root {{
-    --bg: #0a0a0f; --fg: #c8c8d0; --accent: #7b68ee; --accent2: #9d8fff;
+    --bg: #0a0a0f; --fg: #c8c8d0; --accent: #00c2a8; --accent2: #7b68ee;
     --dim: #555568; --card: #12121a; --border: #1e1e2e; --green: #50fa7b;
     --red: #ff5555;
   }}
@@ -1132,7 +1276,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
     transition: border-color 0.15s;
   }}
   .feature:hover {{ border-color: var(--accent); }}
-  .feature .name {{ color: var(--accent2); font-weight: 600; margin-bottom: 0.3rem; }}
+  .feature .name {{ color: var(--green); font-weight: 600; margin-bottom: 0.3rem; }}
   .feature p {{ color: var(--dim); font-size: 0.82rem; line-height: 1.6; }}
 
   /* ── Tables ── */
@@ -1185,10 +1329,9 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <!-- Hero -->
 <div class="hero">
   <h1>shivvr 🔪 <span class="ver">v{version}</span></h1>
-  <p class="sub">Ephemeral semantic embedding service.</p>
+  <p class="sub">Ephemeral semantic embedding & cognitive agent service.</p>
   <p class="desc">
-    Chunk text. Embed with GTR-T5-base (768d). Search by cosine similarity.<br>
-    Fully in-memory. No disk. No state between restarts. GPU on Cloud Run.
+    Chunk text. Embed with GTR-T5-base. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
   </p>
   <div class="ctas">
     <a class="cta" href="#api">View API</a>
@@ -1202,6 +1345,8 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <div class="stats">
   <div class="stat"><div class="val" id="s-uptime">{uptime}s</div><div class="lbl">Uptime</div></div>
   <div class="stat"><div class="val" id="s-gpu">{gpu}</div><div class="lbl">Compute</div></div>
+  <div class="stat"><div class="val" id="s-sessions">{sessions}</div><div class="lbl">Sessions</div></div>
+  <div class="stat"><div class="val" id="s-chunks">{chunks}</div><div class="lbl">Chunks</div></div>
   <div class="stat"><div class="val" id="s-enc">&#x2713;</div><div class="lbl">Encryption</div></div>
   <div class="stat"><div class="val" id="s-inv">{inversion}</div><div class="lbl">Inversion</div></div>
 </div>
@@ -1214,12 +1359,16 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
     <p>Sentence-boundary chunking + GTR-T5-base embeddings (768d). Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
   </div>
   <div class="feature">
-    <div class="name">Search</div>
-    <p>Cosine similarity with optional temporal decay weighting (<code>decay_halflife_hours</code>) and nearby context expansion.</p>
+    <div class="name">FST-BM25 Hybrid Search</div>
+    <p>RRF blending dense vectors and sparse lexical indices. FST dictionary scanning provides microsecond safe query guardrails and intent-entity score boosting.</p>
   </div>
   <div class="feature">
-    <div class="name">Temp store</div>
-    <p>Named ephemeral vector stores with 2 hr TTL. Ideal for agent working memory that doesn't need to outlive a session.</p>
+    <div class="name">Cognitive GhostAgent</div>
+    <p>Turn-based agent loop with integrated memory search, document ingestion, session indexing, and sandboxed command execution. Powered by OpenAI/Anthropic.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Native MCP Server</div>
+    <p>Complete Model Context Protocol HTTP/SSE server endpoint (<code>/mcp/sse</code>) allowing immediate, zero-config integration with Claude Code, Antigravity, and Codex.</p>
   </div>
   <div class="feature">
     <div class="name">Crypto</div>
@@ -1227,11 +1376,7 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
   </div>
   <div class="feature">
     <div class="name">Dual embedding</div>
-    <p><code>organize</code> role uses local GTR-T5-base (768d, always free). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d) — pass your own key per-request or set <code>OPENAI_API_KEY</code> server-side.</p>
-  </div>
-  <div class="feature">
-    <div class="name">Auth</div>
-    <p>nuts-auth RS256 JWT + <code>ahp_</code> API tokens. organize is always free. retrieve requires a token. Unset JWKS URL = open dev mode.</p>
+    <p><code>organize</code> role uses GTR-T5-base (768d). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d) — pass your own key or set server-side.</p>
   </div>
 </div>
 
@@ -1241,8 +1386,11 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 <table>
   <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
   <tr><td class="method">GET</td><td><code>/health</code></td><td>Status, model info, live counts</td></tr>
+  <tr><td class="method">GET</td><td><code>/mcp/sse</code></td><td>MCP Server SSE handshake</td></tr>
+  <tr><td class="method">POST</td><td><code>/mcp/message</code></td><td>MCP Server JSON-RPC message router</td></tr>
+  <tr><td class="method">POST</td><td><code>/sessions/:id/agent/chat</code></td><td>Stream non-blocking GhostAgent cognitive turns (SSE)</td></tr>
   <tr><td class="method">POST</td><td><code>/sessions/:id/ingest</code></td><td>Chunk + embed text into session</td></tr>
-  <tr><td class="method">GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search with optional decay</td></tr>
+  <tr><td class="method">GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search (supports RRF <code>hybrid</code> &amp; <code>lexical_only</code>)</td></tr>
   <tr><td class="method">GET</td><td><code>/sessions/:id</code></td><td>Session metadata</td></tr>
   <tr><td class="method">DELETE</td><td><code>/sessions/:id</code></td><td>Delete session</td></tr>
   <tr><td class="method">GET</td><td><code>/temp</code></td><td>List temp stores with TTL</td></tr>
@@ -1258,28 +1406,25 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
 
 <!-- Quick start -->
 <h2 id="quickstart">Quick start</h2>
-<pre><code><span class="cm"># Ingest</span>
+<pre><code><span class="cm"># Ingest into session</span>
 curl -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
   -H "Content-Type: application/json" \
-  -d '{{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts.", "source": "journal"}}'
+  -d '{{"text": "Supreme Raven is protected by Known Opossum.", "source": "vault_specs"}}'
 
-<span class="cm"># Search</span>
-curl "https://shivvr.nuts.services/sessions/my-session/search?q=morning+at+the+marina&amp;n=5"
-
-<span class="cm"># Search with temporal decay (30% recency, 24h half-life)</span>
-curl "https://shivvr.nuts.services/sessions/my-session/search?q=marina&amp;time_weight=0.3&amp;decay_halflife_hours=24"
-
-<span class="cm"># Retrieve role with your own OpenAI key (no server key needed)</span>
-curl -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
+<span class="cm"># Autonomous Agent Conversational Chat (Streams Thoughts, ToolCalls, &amp; Answer via SSE)</span>
+curl -i -X POST http://localhost:8085/sessions/my-session/agent/chat \
   -H "Content-Type: application/json" \
-  -d '{{"text": "Dense passage for retrieval.", "openai_api_key": "sk-..."}}'
+  -d '{{"message": "Who protects the Supreme Raven?"}}'
 
-curl "https://shivvr.nuts.services/sessions/my-session/search?q=passage&amp;role=retrieve&amp;openai_api_key=sk-..."
+<span class="cm"># Vector-Lexical Hybrid RRF Search</span>
+curl "http://localhost:8085/sessions/my-session/search?q=Known+Opossum&amp;hybrid=true"
 
-<span class="cm"># Temp store (expires in 2h)</span>
-curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
-  -H "Content-Type: application/json" \
-  -d '{{"text": "Working notes for this agent session."}}'</code></pre>
+<span class="cm"># High-speed Lexical-Only BM25 Search (Bypasses ONNX embedder)</span>
+curl "http://localhost:8085/sessions/my-session/search?q=Opossum&amp;lexical_only=true"
+
+<span class="cm"># Synchronize Claude Code or Antigravity with shivvr's Native MCP Server</span>
+nemesis8 mcp add http://localhost:8085/mcp/sse
+</code></pre>
 
 <!-- Search params -->
 <h2>Search parameters</h2>
@@ -1288,6 +1433,9 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
   <tr><th>Param</th><th>Default</th><th>Description</th></tr>
   <tr><td><code>q</code></td><td>required</td><td>Query text</td></tr>
   <tr><td><code>n</code></td><td>5</td><td>Number of results</td></tr>
+  <tr><td><code>hybrid</code></td><td>false</td><td>Blend semantic vectors + BM25 scores (Reciprocal Rank Fusion)</td></tr>
+  <tr><td><code>lexical_only</code></td><td>false</td><td>Bypass vector embedder, execute pure BM25 search</td></tr>
+  <tr><td><code>guardrail</code></td><td>true</td><td>Enable FST toxic term scanning and automatic query blocking</td></tr>
   <tr><td><code>role</code></td><td>organize</td><td><code>organize</code> (768d local) or <code>retrieve</code> (1536d OpenAI)</td></tr>
   <tr><td><code>time_weight</code></td><td>0.0</td><td>Blend semantic + recency score (0–1)</td></tr>
   <tr><td><code>decay_halflife_hours</code></td><td>168</td><td>Recency decay half-life in hours</td></tr>
@@ -1305,8 +1453,8 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
   <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
   <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
-  <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables text-embedding-ada-002 retrieve role</td></tr>
-  <tr><td><code>OPENAI_EMBEDDING_MODEL</code></td><td>text-embedding-ada-002</td><td>Override OpenAI model</td></tr>
+  <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables OpenAI completions and retrieve embeddings</td></tr>
+  <tr><td><code>ANTHROPIC_API_KEY</code></td><td>—</td><td>Enables Anthropic completions and GhostAgent loops</td></tr>
   <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Enable auth (open dev mode if unset)</td></tr>
   <tr><td><code>NUTS_AUTH_VALIDATE_URL</code></td><td>https://auth.nuts.services/api/validate</td><td>API token validation endpoint</td></tr>
 </table>
@@ -1318,11 +1466,12 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
 <table>
   <tr><th>Layer</th><th>Choice</th></tr>
   <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
+  <tr><td>Cognition</td><td>GhostAgent cognitive RAG turn loop (OpenAI / Anthropic compat)</td></tr>
+  <tr><td>MCP Server</td><td>HTTP/SSE JSON-RPC 2.0 Model Context Protocol transport layer</td></tr>
+  <tr><td>Hybrid Index</td><td>Tantivy FST deterministic phrase engine + BM25F field indexer</td></tr>
   <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
-  <tr><td>Retrieve embedding</td><td>text-embedding-ada-002 via OpenAI API — optional</td></tr>
   <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
   <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
-  <tr><td>Auth</td><td>nuts-auth RS256 JWT + ahp_ API tokens — optional</td></tr>
   <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>
 </table>
 </div>
@@ -1356,6 +1505,7 @@ curl -X POST https://shivvr.nuts.services/temp/scratch/ingest \
     return String(n);
   }}
   function counter(el, target, suffix) {{
+    if (!el) return;
     if (typeof target !== 'number' || target === 0) {{ el.textContent = fmt(target) + (suffix||''); return; }}
     var start = 0, dur = 800, step = 16;
     var t = setInterval(function() {{
@@ -1474,7 +1624,7 @@ async fn nuts_auth_gate(
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let r = Router::new()
         .route("/", get(homepage))
         .route("/health", get(health))
         .route("/sessions/:session_id/ingest", post(ingest))
@@ -1491,6 +1641,431 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/:agent_id/encrypt", post(encrypt_embeddings))
         // Phase 3: Inversion endpoint
         .route("/invert", post(invert))
-        .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate))
+        .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate));
+
+    // Register MCP & Agent endpoints without the authentication gate for seamless integration
+    r.route("/mcp/sse", get(mcp_sse))
+        .route("/mcp/message", post(mcp_message))
+        .route("/sessions/:session_id/agent/chat", post(agent_chat))
         .with_state(state)
+}
+
+// ===== MCP & Agent Chat Implementation =====
+
+#[derive(Deserialize)]
+pub struct AgentChatRequest {
+    pub message: String,
+}
+
+pub async fn agent_chat(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<AgentChatRequest>,
+) -> impl IntoResponse {
+    use axum::response::sse::Sse;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    
+    let agent = crate::agent::GhostAgent::new(
+        state.store.clone(),
+        state.temp_store.clone(),
+        state.chunker.clone(),
+        state.embedder.clone(),
+    );
+
+    tokio::spawn(async move {
+        agent.run_loop(session_id, payload.message, tx).await;
+    });
+
+    let stream = UnboundedReceiverStream::new(rx);
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+#[derive(Deserialize)]
+pub struct McpMessageQuery {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: Option<serde_json::Value>,
+    pub method: String,
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+}
+
+#[derive(Serialize)]
+pub struct JsonRpcError {
+    pub code: i32,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+pub async fn mcp_sse(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    use axum::response::sse::{Event, Sse};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Dynamically retrieve the request host header
+    let host = req.headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:8085");
+
+    let post_url = format!("http://{}/mcp/message?id={}", host, client_id);
+
+    {
+        let mut conns = state.mcp_connections.write().await;
+        conns.insert(client_id.clone(), tx.clone());
+    }
+
+    // Emit the initial "endpoint" event informing client where to send POSTs
+    let endpoint_event = Event::default().event("endpoint").data(post_url);
+    let _ = tx.send(Ok(endpoint_event));
+
+    let stream = UnboundedReceiverStream::new(rx);
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+pub async fn mcp_message(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<McpMessageQuery>,
+    Json(payload): Json<JsonRpcRequest>,
+) -> impl IntoResponse {
+    let id_val = payload.id.clone().unwrap_or(serde_json::Value::Null);
+
+    let response = match process_mcp_request(&state, payload).await {
+        Ok(result) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: id_val,
+            result: Some(result),
+            error: None,
+        },
+        Err(err) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: id_val,
+            result: None,
+            error: Some(err),
+        },
+    };
+
+    let tx = {
+        let conns = state.mcp_connections.read().await;
+        conns.get(&query.id).cloned()
+    };
+
+    if let Some(tx) = tx {
+        if let Ok(data_str) = serde_json::to_string(&response) {
+            let sse_event = axum::response::sse::Event::default().event("message").data(data_str);
+            let _ = tx.send(Ok(sse_event));
+        }
+        StatusCode::ACCEPTED.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+async fn process_mcp_request(
+    state: &Arc<AppState>,
+    req: JsonRpcRequest,
+) -> Result<serde_json::Value, JsonRpcError> {
+    match req.method.as_str() {
+        "initialize" => {
+            Ok(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {},
+                    "resources": {}
+                },
+                "serverInfo": {
+                    "name": "shivvr-mcp",
+                    "version": "0.2.0"
+                }
+            }))
+        }
+        "notifications/initialized" => {
+            Ok(serde_json::json!({}))
+        }
+        "tools/list" => {
+            Ok(serde_json::json!({
+                "tools": [
+                    {
+                        "name": "search_memory",
+                        "description": "Query high-performance hybrid memory search.",
+                        "inputSchema": {
+                          "type": "object",
+                          "properties": {
+                            "session_id": { "type": "string", "description": "The memory session ID to search." },
+                            "query": { "type": "string", "description": "The semantic search query." },
+                            "lexical_only": { "type": "boolean", "description": "Whether to perform keyword-only search (default: false)." }
+                          },
+                          "required": ["session_id", "query"]
+                        }
+                    },
+                    {
+                        "name": "ingest_memory",
+                        "description": "Index a new memory string.",
+                        "inputSchema": {
+                          "type": "object",
+                          "properties": {
+                            "session_id": { "type": "string", "description": "The session ID to store the memory in." },
+                            "text": { "type": "string", "description": "The text content of the memory fragment to index." },
+                            "source": { "type": "string", "description": "Optional source filename or metadata label." }
+                          },
+                          "required": ["session_id", "text"]
+                        }
+                    },
+                    {
+                        "name": "list_sessions",
+                        "description": "Return active memory sessions.",
+                        "inputSchema": {
+                          "type": "object",
+                          "properties": {}
+                        }
+                    },
+                    {
+                        "name": "run_command",
+                        "description": "Execute a shell command inside the linux container.",
+                        "inputSchema": {
+                          "type": "object",
+                          "properties": {
+                            "command": { "type": "string", "description": "The command string to execute." }
+                          },
+                          "required": ["command"]
+                        }
+                    }
+                ]
+            }))
+        }
+        "tools/call" => {
+            let params = req.params.ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing params for tools/call".to_string(),
+                data: None,
+            })?;
+            let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing tool name in tools/call".to_string(),
+                data: None,
+            })?;
+            let arguments = params.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
+
+            let result_str = match name {
+                "search_memory" => {
+                    let session_id = arguments.get("session_id").and_then(|v| v.as_str()).unwrap_or("default");
+                    let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let lexical_only = arguments.get("lexical_only").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                    let query_embedding = if lexical_only {
+                        None
+                    } else {
+                        state.embedder.embed(query).ok()
+                    };
+
+                    match state.store.search_hybrid(
+                        session_id,
+                        query,
+                        query_embedding.as_deref(),
+                        5,
+                        None,
+                        168.0,
+                        "organize",
+                        &[],
+                        &state.search_params,
+                    ) {
+                        Ok(results) => {
+                            let mapped: Vec<serde_json::Value> = results.into_iter().map(|(chunk, score)| {
+                                serde_json::json!({
+                                    "chunk_id": chunk.id,
+                                    "score": score,
+                                    "text": chunk.text,
+                                    "source": chunk.source,
+                                    "metadata": chunk.metadata,
+                                    "created_at": chunk.created_at.to_rfc3339()
+                                })
+                            }).collect();
+                            serde_json::to_string_pretty(&mapped).unwrap_or_else(|_| "[]".to_string())
+                        }
+                        Err(e) => format!("Error searching hybrid store: {}", e),
+                    }
+                }
+                "ingest_memory" => {
+                    let session_id = arguments.get("session_id").and_then(|v| v.as_str()).unwrap_or("default");
+                    let text = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    let source = arguments.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                    match state.chunker.chunk(text, source, serde_json::Value::Null).await {
+                        Ok(chunks) => {
+                            if chunks.is_empty() {
+                                "Success: Text was too short or no chunks produced.".to_string()
+                            } else {
+                                let first_id = chunks[0].id.clone();
+                                match state.store.add_chunks(session_id, chunks, None) {
+                                    Ok(_) => format!("Success: Memory chunk indexed under ID {}", first_id),
+                                    Err(e) => format!("Error indexing chunk in store: {}", e),
+                                }
+                            }
+                        }
+                        Err(e) => format!("Error chunking text: {}", e),
+                    }
+                }
+                "list_sessions" => {
+                    let sessions = state.store.list_sessions(None).unwrap_or_default();
+                    let mapped: Vec<serde_json::Value> = sessions.into_iter().map(|s| {
+                        serde_json::json!({
+                            "id": s.id,
+                            "chunks": s.chunk_count,
+                            "last_active": s.last_ingested.to_rfc3339()
+                        })
+                    }).collect();
+                    serde_json::to_string_pretty(&mapped).unwrap_or_else(|_| "[]".to_string())
+                }
+                "run_command" => {
+                    let command = arguments.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                    if command.is_empty() {
+                        "Error: Empty command".to_string()
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            match std::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(command)
+                                .output()
+                            {
+                                Ok(output) => {
+                                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                                    format!("Exit Code: {}\nSTDOUT:\n{}\nSTDERR:\n{}", output.status.code().unwrap_or(-1), stdout, stderr)
+                                }
+                                Err(e) => format!("Error executing command: {}", e),
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            "Error: run_command is only supported in Unix/Linux container environments".to_string()
+                        }
+                    }
+                }
+                _ => return Err(JsonRpcError {
+                    code: -32601,
+                    message: format!("Method not found: {}", name),
+                    data: None,
+                }),
+            };
+
+            Ok(serde_json::json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": result_str
+                    }
+                ]
+            }))
+        }
+        "resources/list" => {
+            let sessions = state.store.list_sessions(None).unwrap_or_default();
+            let mut resources = vec![
+                serde_json::json!({
+                    "uri": "shivvr://sessions",
+                    "name": "Memory Sessions Overview",
+                    "description": "List of all active memory sessions in shivvr",
+                    "mimeType": "application/json"
+                })
+            ];
+
+            for s in sessions {
+                resources.push(serde_json::json!({
+                    "uri": format!("shivvr://sessions/{}", s.id),
+                    "name": format!("Session '{}' Memory Dump", s.id),
+                    "description": format!("Memory chunks indexed under session '{}'", s.id),
+                    "mimeType": "application/json"
+                }));
+            }
+
+            Ok(serde_json::json!({ "resources": resources }))
+        }
+        "resources/read" => {
+            let params = req.params.ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing params for resources/read".to_string(),
+                data: None,
+            })?;
+            let uri = params.get("uri").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing uri in resources/read".to_string(),
+                data: None,
+            })?;
+
+            if uri == "shivvr://sessions" {
+                let sessions = state.store.list_sessions(None).unwrap_or_default();
+                let mapped: Vec<serde_json::Value> = sessions.into_iter().map(|s| {
+                    serde_json::json!({
+                        "id": s.id,
+                        "chunks": s.chunk_count,
+                        "last_active": s.last_ingested.to_rfc3339()
+                    })
+                }).collect();
+                let dump = serde_json::to_string_pretty(&mapped).unwrap_or_default();
+                Ok(serde_json::json!({
+                    "contents": [
+                        {
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": dump
+                        }
+                    ]
+                }))
+            } else if uri.starts_with("shivvr://sessions/") {
+                let session_id = &uri["shivvr://sessions/".len()..];
+                let chunks = state.store.get_chunks(session_id).unwrap_or_default();
+                let mapped: Vec<serde_json::Value> = chunks.into_iter().map(|chunk| {
+                    serde_json::json!({
+                        "chunk_id": chunk.id,
+                        "text": chunk.text,
+                        "source": chunk.source,
+                        "metadata": chunk.metadata,
+                        "created_at": chunk.created_at.to_rfc3339()
+                    })
+                }).collect();
+                let dump = serde_json::to_string_pretty(&mapped).unwrap_or_default();
+                Ok(serde_json::json!({
+                    "contents": [
+                        {
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": dump
+                        }
+                    ]
+                }))
+            } else {
+                Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Unsupported resource URI: {}", uri),
+                    data: None,
+                })
+            }
+        }
+        _ => Err(JsonRpcError {
+            code: -32601,
+            message: format!("Method not found: {}", req.method),
+            data: None,
+        }),
+    }
 }

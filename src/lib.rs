@@ -2,6 +2,8 @@ pub mod auth;
 #[cfg(feature = "ml")]
 pub mod api;
 #[cfg(feature = "ml")]
+pub mod agent;
+#[cfg(feature = "ml")]
 pub mod chunker;
 pub mod crypto;
 #[cfg(feature = "ml")]
