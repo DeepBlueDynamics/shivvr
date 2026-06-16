@@ -109,6 +109,27 @@ Builds from source with CUDA, starts on `:8080`. No volume needed.
 |--------|----------|-------------|
 | POST | `/invert` | Reconstruct approximate text from embedding |
 
+Inversion is **approximate, not lossless**. Embedding is many-to-one — many
+different sentences map to nearly the same 768d vector — so a single `/invert`
+call returns text that is *semantically close* to the source but rarely the same
+words. Invert the embedding of "Rust is a systems programming language" and you
+might get back "the Rust language is used for systems programming": same meaning,
+different tokens.
+
+To get closer, **iterate** (vec2text-style correction loop):
+
+1. Start with the target vector `v`.
+2. `/invert` → candidate text `t`.
+3. Re-embed `t` (ingest it) → vector `v'`.
+4. Compare `cos(v, v')`. If it's not close enough, invert again and repeat.
+
+Each round nudges the wording so its embedding moves toward `v`; cosine
+similarity climbs and the text stabilizes. The fixed point is text whose
+embedding reproduces the target vector — text and vector have converged, even if
+the final wording still differs from the original. Use `max_length` to bound the
+decoded length per pass. (Requires the inverter models — see the
+`INVERTER_*` env vars; otherwise `/invert` returns `503`.)
+
 ### Ingest
 
 ```bash
@@ -183,4 +204,4 @@ Leave `NUTS_AUTH_JWKS_URL` unset for open dev mode.
 
 ## License
 
-Proprietary. All rights reserved.
+BSD 3-Clause. See [LICENSE](LICENSE).
