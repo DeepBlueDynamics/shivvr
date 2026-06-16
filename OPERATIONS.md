@@ -3,13 +3,56 @@
 ## Service
 
 - **Production URL**: https://shivvr.nuts.services (mapped via Cloud Run domain)
-- **Cloud Run URL**: https://shivvr-949870462453.us-central1.run.app
-- **GCP Project**: gnosis-459403
+- **Cloud Run URL**: `https://shivvr-<PROJECT_NUMBER>.us-central1.run.app` (auto-assigned; see below to look it up)
+- **GCP Project**: your own project — see [Google Cloud project](#google-cloud-project)
 - **Region**: us-central1
 - **Service name**: shivvr
 - **GPU**: NVIDIA L4 (1x), CUDA 12.6
 - **Concurrency**: 4 (serialized GPU inference)
 - **Instances**: 0 min, 1 max (scales to zero)
+
+---
+
+## Google Cloud project
+
+Every command in this manual targets **your own** Google Cloud project. Set the
+project ID once per shell and the snippets below work as-is:
+
+```bash
+export PROJECT_ID="$(gcloud config get-value project)"   # or paste your project ID
+```
+
+Don't know your project ID, or need to pick one?
+
+```bash
+gcloud projects list                       # all projects you can access (ID + number)
+gcloud config get-value project            # the currently active project ID
+gcloud config set project YOUR_PROJECT_ID  # switch the active project
+```
+
+Starting from scratch? Create a project, then enable the APIs this service uses:
+
+```bash
+gcloud projects create YOUR_PROJECT_ID --name="shivvr"
+gcloud config set project YOUR_PROJECT_ID
+# Link billing in the console, then:
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com containerregistry.googleapis.com
+```
+
+> **ID vs. number:** the project **ID** (e.g. `my-shivvr-proj`) is the
+> human-readable string you choose and is what almost every `gcloud` command
+> wants. The project **number** (e.g. `123456789012`) is auto-assigned and shows
+> up in the default Cloud Run URL. Look up your number with:
+> ```bash
+> gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)"
+> ```
+
+Once `$PROJECT_ID` is set, you can find your live Cloud Run URL anytime with:
+
+```bash
+gcloud run services describe shivvr --region us-central1 \
+  --project "$PROJECT_ID" --format="value(status.url)"
+```
 
 ---
 
@@ -23,7 +66,7 @@ bash deploy.sh
 ```
 
 What it does:
-1. `gcloud builds submit` — uploads source, builds Docker image in GCP (downloads PyTorch + HuggingFace models, compiles Rust with CUDA), pushes to `gcr.io/gnosis-459403/shivvr:latest`
+1. `gcloud builds submit` — uploads source, builds Docker image in GCP (downloads PyTorch + HuggingFace models, compiles Rust with CUDA), pushes to `gcr.io/$PROJECT_ID/shivvr:latest`
 2. `gcloud run deploy` — deploys new revision, routes 100% traffic
 
 Build time: ~10–15 min first run (model download + Rust compile), ~8 min with partial cache.
@@ -34,9 +77,9 @@ Build time: ~10–15 min first run (model download + Rust compile), ~8 min with 
 
 ```bash
 gcloud run deploy shivvr \
-  --image gcr.io/gnosis-459403/shivvr:latest \
+  --image gcr.io/$PROJECT_ID/shivvr:latest \
   --region us-central1 \
-  --project gnosis-459403 \
+  --project "$PROJECT_ID" \
   --platform managed \
   --allow-unauthenticated \
   --memory 16Gi \
@@ -60,14 +103,14 @@ gcloud run deploy shivvr \
 curl https://shivvr.nuts.services/health
 
 # Cloud Run revision list
-gcloud run revisions list --service shivvr --region us-central1 --project gnosis-459403
+gcloud run revisions list --service shivvr --region us-central1 --project "$PROJECT_ID"
 
 # Current service URL
-gcloud run services describe shivvr --region us-central1 --project gnosis-459403 --format="value(status.url)"
+gcloud run services describe shivvr --region us-central1 --project "$PROJECT_ID" --format="value(status.url)"
 
 # Logs (last 100 lines)
 gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=shivvr" \
-  --project gnosis-459403 --limit 100 --format "value(textPayload)"
+  --project "$PROJECT_ID" --limit 100 --format "value(textPayload)"
 ```
 
 ---
@@ -76,12 +119,12 @@ gcloud logging read "resource.type=cloud_run_revision AND resource.labels.servic
 
 ```bash
 # List revisions
-gcloud run revisions list --service shivvr --region us-central1 --project gnosis-459403
+gcloud run revisions list --service shivvr --region us-central1 --project "$PROJECT_ID"
 
 # Route traffic to a previous revision
 gcloud run services update-traffic shivvr \
   --region us-central1 \
-  --project gnosis-459403 \
+  --project "$PROJECT_ID" \
   --to-revisions shivvr-00001-xxx=100
 ```
 
@@ -92,13 +135,13 @@ gcloud run services update-traffic shivvr \
 Domain `shivvr.nuts.services` is mapped to the Cloud Run service. To update or verify:
 
 ```bash
-gcloud run domain-mappings list --region us-central1 --project gnosis-459403
+gcloud run domain-mappings list --region us-central1 --project "$PROJECT_ID"
 
 gcloud run domain-mappings create \
   --service shivvr \
   --domain shivvr.nuts.services \
   --region us-central1 \
-  --project gnosis-459403
+  --project "$PROJECT_ID"
 ```
 
 DNS: CNAME `shivvr.nuts.services` → `ghs.googlehosted.com.`  
@@ -130,7 +173,7 @@ Set a secret env var:
 ```bash
 gcloud run services update shivvr \
   --region us-central1 \
-  --project gnosis-459403 \
+  --project "$PROJECT_ID" \
   --set-env-vars OPENAI_API_KEY=sk-...
 ```
 
@@ -150,12 +193,12 @@ gcloud run services update shivvr \
 ## Cloud Build history
 
 ```bash
-gcloud builds list --project gnosis-459403 --limit 10
+gcloud builds list --project "$PROJECT_ID" --limit 10
 ```
 
 View a specific build:
 ```bash
-gcloud builds log BUILD_ID --project gnosis-459403
+gcloud builds log BUILD_ID --project "$PROJECT_ID"
 ```
 
 ---
