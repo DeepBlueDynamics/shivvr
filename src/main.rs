@@ -11,6 +11,21 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+
+    // Landing-only mode: skip all model/backend initialization entirely and
+    // serve just the static homepage + a stub /health. Used for a lightweight,
+    // GPU-less "front door" instance -- the real backend runs as a separate
+    // service, started on demand, and is not touched here.
+    if std::env::var("LANDING_ONLY").map(|v| v == "true").unwrap_or(false) {
+        println!("LANDING_ONLY=true -- serving static homepage only, no backend/model init");
+        let app = api::landing_router();
+        let addr = format!("0.0.0.0:{}", port);
+        println!("Starting shivvr (landing-only) on {}", addr);
+        let listener = TcpListener::bind(&addr).await?;
+        axum::serve(listener, app).await?;
+        return Ok(());
+    }
+
     let model_path = std::env::var("MODEL_PATH")
         .unwrap_or_else(|_| "models/gtr-t5-base.onnx".to_string());
     let tokenizer_path = std::env::var("TOKENIZER_PATH")
