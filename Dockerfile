@@ -1,3 +1,8 @@
+ARG MODELS_IMAGE=gcr.io/gnosis-459403/shivvr-models:latest
+# Stage 1: prebuilt ONNX models. Built separately from Dockerfile.models (deploy.sh --rebuild-models);
+# Cloud Build never uploads the gitignored models/ directory, so the app image copies from this image.
+FROM ${MODELS_IMAGE} AS models
+
 # Stage 2: Rust build (CUDA)
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04 AS builder
 
@@ -35,7 +40,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/shivvr /shivvr
 COPY --from=builder /ort-libs /usr/lib/onnxruntime/
-COPY models/ /models/
+COPY --from=models /models /models
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
 ENV PORT=8080
