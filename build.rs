@@ -48,20 +48,60 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn find_lib_exe() -> Option<String> {
-    // Try common VS paths
-    let paths = [
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\lib.exe",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Tools\MSVC\14.16.27023\bin\Hostx64\x64\lib.exe",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64\lib.exe",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.38.33130\bin\Hostx64\x64\lib.exe",
-    ];
-    for path in &paths {
-        if std::path::Path::new(path).exists() {
-            return Some(path.to_string());
+    // 1. Explicit override: LIB_EXE=<full path to lib.exe>.
+    println!("cargo:rerun-if-env-changed=LIB_EXE");
+    if let Ok(path) = std::env::var("LIB_EXE") {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
         }
+        println!("cargo:warning=LIB_EXE is set but does not exist: {}", path);
     }
-    // Try finding via vswhere or PATH
+    // 2. Ask the Visual Studio installer where the newest MSVC toolchain is.
+    if let Some(path) = vswhere_lib_exe() {
+        return Some(path);
+    }
+    // 3. Anything already on PATH (e.g. inside a Developer Command Prompt).
     which_lib_exe()
+}
+
+/// Locate lib.exe through vswhere.exe, which ships with every Visual Studio
+/// and Build Tools install since 2017. Works for any edition and MSVC version,
+/// unlike a hardcoded path.
+#[cfg(target_os = "windows")]
+fn vswhere_lib_exe() -> Option<String> {
+    let program_files = std::env::var("ProgramFiles(x86)")
+        .or_else(|_| std::env::var("ProgramFiles"))
+        .ok()?;
+    let vswhere = std::path::Path::new(&program_files)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    if !vswhere.exists() {
+        return None;
+    }
+    let output = std::process::Command::new(vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-find",
+            r"VC\Tools\MSVC\**\bin\Hostx64\x64\lib.exe",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // Several MSVC versions may be installed side by side; vswhere lists them
+    // in ascending order, so the last line is the newest.
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .last()
+        .map(str::to_string)
 }
 
 #[cfg(target_os = "windows")]
