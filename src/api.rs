@@ -2493,6 +2493,18 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 // ===== MCP & Agent Chat Implementation =====
 
+/// `run_command` executes arbitrary shell inside the container, so it is off
+/// unless `SHIVVR_ENABLE_RUN_COMMAND=true` (or `1`) is set explicitly. When
+/// off it is omitted from `tools/list` and refused by `tools/call`.
+pub fn run_command_enabled() -> bool {
+    std::env::var("SHIVVR_ENABLE_RUN_COMMAND")
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true") || v == "1"
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Deserialize)]
 pub struct AgentChatRequest {
     pub message: String,
@@ -2649,7 +2661,7 @@ async fn process_mcp_request(
             Ok(serde_json::json!({}))
         }
         "tools/list" => {
-            Ok(serde_json::json!({
+            let mut tools = serde_json::json!({
                 "tools": [
                     {
                         "name": "search_memory",
@@ -2684,8 +2696,12 @@ async fn process_mcp_request(
                           "type": "object",
                           "properties": {}
                         }
-                    },
-                    {
+                    }
+                ]
+            });
+            if run_command_enabled() {
+                if let Some(list) = tools.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                    list.push(serde_json::json!({
                         "name": "run_command",
                         "description": "Execute a shell command inside the linux container.",
                         "inputSchema": {
@@ -2695,9 +2711,10 @@ async fn process_mcp_request(
                           },
                           "required": ["command"]
                         }
-                    }
-                ]
-            }))
+                    }));
+                }
+            }
+            Ok(tools)
         }
         "tools/call" => {
             let params = req.params.ok_or_else(|| JsonRpcError {
@@ -2781,6 +2798,9 @@ async fn process_mcp_request(
                         })
                     }).collect();
                     serde_json::to_string_pretty(&mapped).unwrap_or_else(|_| "[]".to_string())
+                }
+                "run_command" if !run_command_enabled() => {
+                    "Error: run_command is disabled on this server. Set SHIVVR_ENABLE_RUN_COMMAND=true to enable it.".to_string()
                 }
                 "run_command" => {
                     let command = arguments.get("command").and_then(|v| v.as_str()).unwrap_or("");

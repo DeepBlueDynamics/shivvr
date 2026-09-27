@@ -201,6 +201,7 @@ curl "http://localhost:8080/sessions/my-session/search?q=marina&role=retrieve"
 | `VISION_MODEL_PATH` | `models/siglip-vision.onnx` | SigLIP vision tower (`/image/embed`) |
 | `SIGLIP_TEXT_MODEL_PATH` | `models/siglip-text.onnx` | SigLIP text tower (`/embed` model=siglip-base-patch16-224) |
 | `SIGLIP_TOKENIZER_PATH` | `models/siglip-tokenizer.json` | Fast-tokenizer JSON for the SigLIP text tower |
+| `SHIVVR_ENABLE_RUN_COMMAND` | unset (off) | **Danger.** Exposes the MCP `run_command` tool, which runs arbitrary shell inside the container. Leave unset anywhere the MCP endpoint is reachable by untrusted clients |
 | `SHIVVR_REQUEST_TIMEOUT_SECS` | `120` | Server-side timeout for inference routes (`/embed`, `/image/embed`, `/audio/*`, ingest, `/invert`); other routes use `min(30, this)`. Timed-out requests get `408` with `{"error": ...}` |
 
 ## Search query parameters

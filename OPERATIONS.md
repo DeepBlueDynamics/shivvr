@@ -194,6 +194,7 @@ Optional vars (set in Cloud Run console or via `--set-env-vars`):
 | `OPENAI_EMBEDDING_MODEL` | Override OpenAI model (default: text-embedding-ada-002) |
 | `NUTS_AUTH_JWKS_URL` | Enable nuts-auth JWT verification |
 | `NUTS_AUTH_VALIDATE_URL` | API token validation endpoint |
+| `SHIVVR_ENABLE_RUN_COMMAND` | **Danger.** Enables the MCP `run_command` tool (arbitrary shell in the container). Off by default; do not set in production |
 | `SHIVVR_REQUEST_TIMEOUT_SECS` | Server-side timeout for inference routes (default 120; other routes use min(30, this)) |
 
 Set a secret env var:
