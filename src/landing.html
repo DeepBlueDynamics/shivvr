@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shivvr — semantic embedding & cognitive agent service</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0a'/%3E%3Cpath d='M10 11 Q16 8 22 11 Q16 14 10 17 Q16 20 22 23' stroke='%2300c2a8' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<meta name="description" content="Ephemeral semantic embedding & cognitive agent service. Chunk text, embed with GTR-T5-base (768d), search with hybrid BM25 + FST routers, and run autonomous tool reasoning loops.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://shivvr.nuts.services">
+<meta property="og:title" content="shivvr — semantic embedding & cognitive agent service">
+<meta property="og:description" content="Chunk. Embed. Hybrid Search. Autonomous GhostAgent. Ephemeral RAG + MCP server. Rust + ONNX Runtime on GPU. No disk. No state.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:site" content="@deepbluedynamic">
+<meta name="twitter:title" content="shivvr — semantic embedding & cognitive agent service">
+<meta name="twitter:description" content="Chunk. Embed. Hybrid Search. Autonomous GhostAgent. Ephemeral RAG + MCP server. Rust + ONNX Runtime on GPU. No disk. No state.">
+<style>
+  :root {
+    --bg: #0a0a0f; --fg: #c8c8d0; --accent: #00c2a8; --accent2: #7b68ee;
+    --dim: #555568; --card: #12121a; --border: #1e1e2e; --green: #50fa7b;
+    --red: #ff5555;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 14px; line-height: 1.75;
+    padding: 2.5rem 2rem; max-width: 900px; margin: 0 auto;
+  }
+
+  /* ── Hero ── */
+  .hero { margin-bottom: 3rem; }
+  .hero h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    color: var(--accent); letter-spacing: -0.03em;
+    line-height: 1.1; margin-bottom: 0.4rem;
+  }
+  .hero h1 .ver { color: var(--dim); font-weight: 300; font-size: 0.42em; vertical-align: middle; }
+  .hero .sub {
+    color: var(--fg); font-size: 1.05rem; margin-bottom: 0.5rem;
+  }
+  .hero .desc { color: var(--dim); font-size: 0.85rem; margin-bottom: 1.75rem; max-width: 560px; }
+  .ctas { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .cta {
+    display: inline-block;
+    padding: 0.55rem 1.25rem; border-radius: 6px; font-size: 0.82rem;
+    text-decoration: none; transition: all 0.15s;
+    border: 1px solid var(--accent); color: var(--accent);
+  }
+  .cta:hover { background: var(--accent); color: #fff; text-decoration: none; }
+  .cta.dim { border-color: var(--border); color: var(--dim); }
+  .cta.dim:hover { border-color: var(--dim); background: transparent; color: var(--fg); }
+
+  /* ── Stats strip ── */
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 1rem; margin-bottom: 3rem;
+  }
+  .stat {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 1.2rem;
+  }
+  .stat .val { font-size: 1.6rem; color: var(--green); font-weight: 700; line-height: 1.2; }
+  .stat .lbl {
+    font-size: 0.7rem; color: var(--dim);
+    text-transform: uppercase; letter-spacing: 0.1em; margin-top: 0.15rem;
+  }
+
+  /* ── Section headings ── */
+  h2 {
+    color: var(--accent); font-size: 0.72rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    margin: 2.5rem 0 0.9rem; padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ── Capability cards ── */
+  .features {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.9rem; margin-bottom: 0.5rem;
+  }
+  .feature {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 1.2rem;
+    transition: border-color 0.15s;
+  }
+  .feature:hover { border-color: var(--accent); }
+  .feature .name { color: var(--green); font-weight: 600; margin-bottom: 0.3rem; }
+  .feature p { color: var(--dim); font-size: 0.82rem; line-height: 1.6; }
+
+  /* ── Tables ── */
+  .tbl-wrap { overflow-x: auto; margin: 0.25rem 0 0.5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 0.45rem 0.8rem; border-bottom: 1px solid var(--border); }
+  th {
+    color: var(--dim); font-weight: 600; font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  td:first-child { color: var(--dim); white-space: nowrap; }
+  td code { color: var(--green); }
+  .method { color: var(--accent2); font-size: 0.75rem; }
+  tr:last-child td { border-bottom: none; }
+
+  /* ── Code blocks ── */
+  pre {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1.1rem 1.25rem;
+    overflow-x: auto; font-size: 0.8rem; line-height: 1.7;
+    margin: 0.25rem 0;
+  }
+  .cm { color: var(--dim); }
+  .kw { color: var(--accent2); }
+
+  /* ── Inline ── */
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { color: var(--green); font-size: 0.82rem; }
+
+  /* ── Footer links ── */
+  .links { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 3rem; }
+  .links a {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem 1.1rem; font-size: 0.8rem;
+    transition: border-color 0.15s;
+  }
+  .links a:hover { border-color: var(--accent); text-decoration: none; }
+
+  .footer {
+    color: var(--dim); font-size: 0.72rem; margin-top: 1.5rem;
+    padding-top: 1.5rem; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
+  }
+  .dot { color: var(--border); }
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<div class="hero">
+  <h1>shivvr 🔪 <span class="ver">v0.3.0</span></h1>
+  <p class="sub">Ephemeral semantic embedding & cognitive agent service.</p>
+  <p class="desc">
+    Chunk text. Embed with GTR-T5-base. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
+  </p>
+  <div class="ctas">
+    <a class="cta" href="#api">View API</a>
+    <a class="cta" href="#quickstart">Quick Start</a>
+    <a class="cta" href="https://github.com/DeepBlueDynamics/shivvr">GitHub</a>
+    <a class="cta dim" href="/health">Health</a>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat"><div class="val">On-demand</div><div class="lbl">Uptime</div></div>
+  <div class="stat"><div class="val">CUDA</div><div class="lbl">Compute</div></div>
+  <div class="stat"><div class="val">Ephemeral</div><div class="lbl">Sessions</div></div>
+  <div class="stat"><div class="val">Ephemeral</div><div class="lbl">Chunks</div></div>
+  <div class="stat"><div class="val">&#x2713;</div><div class="lbl">Encryption</div></div>
+  <div class="stat"><div class="val">Optional</div><div class="lbl">Inversion</div></div>
+</div>
+
+<!-- Capabilities -->
+<h2>Capabilities</h2>
+<div class="features">
+  <div class="feature">
+    <div class="name">Ingest</div>
+    <p>Sentence-boundary chunking + GTR-T5-base embeddings (768d). Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
+  </div>
+  <div class="feature">
+    <div class="name">FST-BM25 Hybrid Search</div>
+    <p>RRF blending dense vectors and sparse lexical indices. FST dictionary scanning provides microsecond safe query guardrails and intent-entity score boosting.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Cognitive GhostAgent</div>
+    <p>Turn-based agent loop with integrated memory search, document ingestion, session indexing, and sandboxed command execution. Powered by OpenAI/Anthropic.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Native MCP Server</div>
+    <p>Complete Model Context Protocol HTTP/SSE server endpoint (<code>/mcp/sse</code>) allowing immediate, zero-config integration with Claude Code, Antigravity, and Codex.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Crypto</div>
+    <p>Per-agent orthogonal matrix rotation on embeddings. Cosine similarity preserved under encryption. Keys are in-memory only.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Dual embedding</div>
+    <p><code>organize</code> role uses GTR-T5-base (768d). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d) — pass your own key or set server-side.</p>
+  </div>
+</div>
+
+<!-- API -->
+<h2 id="api">API</h2>
+<p>API requests require a nuts-auth bearer token. The GPU backend starts on demand, so the first request can take longer.</p>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+  <tr><td class="method">GET</td><td><code>/health</code></td><td>Gateway status; model backend starts on an authorized API request</td></tr>
+  <tr><td class="method">GET</td><td><code>/mcp/sse</code></td><td>MCP Server SSE handshake</td></tr>
+  <tr><td class="method">POST</td><td><code>/mcp/message</code></td><td>MCP Server JSON-RPC message router</td></tr>
+  <tr><td class="method">POST</td><td><code>/sessions/:id/agent/chat</code></td><td>Stream non-blocking GhostAgent cognitive turns (SSE)</td></tr>
+  <tr><td class="method">POST</td><td><code>/sessions/:id/ingest</code></td><td>Chunk + embed text into session</td></tr>
+  <tr><td class="method">GET</td><td><code>/sessions/:id/search?q=...</code></td><td>Semantic search (supports RRF <code>hybrid</code> &amp; <code>lexical_only</code>)</td></tr>
+  <tr><td class="method">GET</td><td><code>/sessions/:id</code></td><td>Session metadata</td></tr>
+  <tr><td class="method">DELETE</td><td><code>/sessions/:id</code></td><td>Delete session</td></tr>
+  <tr><td class="method">GET</td><td><code>/temp</code></td><td>List temp stores with TTL</td></tr>
+  <tr><td class="method">POST</td><td><code>/temp/:name/ingest</code></td><td>Ingest into temp store (2 hr TTL)</td></tr>
+  <tr><td class="method">GET</td><td><code>/temp/:name/search?q=...</code></td><td>Search temp store</td></tr>
+  <tr><td class="method">DELETE</td><td><code>/temp/:name</code></td><td>Delete temp store</td></tr>
+  <tr><td class="method">POST</td><td><code>/agent/:id/register</code></td><td>Register per-agent orthogonal key</td></tr>
+  <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
+  <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
+  <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
+</table>
+</div>
+
+<!-- Quick start -->
+<h2 id="quickstart">Quick start</h2>
+<pre><code><span class="cm"># Ingest into session</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Supreme Raven is protected by Known Opossum.", "source": "vault_specs"}'
+
+<span class="cm"># Autonomous Agent Conversational Chat (Streams Thoughts, ToolCalls, &amp; Answer via SSE)</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -i -X POST https://shivvr.nuts.services/sessions/my-session/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Who protects the Supreme Raven?"}'
+
+<span class="cm"># Vector-Lexical Hybrid RRF Search</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" "https://shivvr.nuts.services/sessions/my-session/search?q=Known+Opossum&amp;hybrid=true"
+
+<span class="cm"># High-speed Lexical-Only BM25 Search (Bypasses ONNX embedder)</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" "https://shivvr.nuts.services/sessions/my-session/search?q=Opossum&amp;lexical_only=true"
+
+<span class="cm"># Synchronize Claude Code or Antigravity with shivvr's Native MCP Server</span>
+nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
+</code></pre>
+
+<!-- Search params -->
+<h2>Search parameters</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Param</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>q</code></td><td>required</td><td>Query text</td></tr>
+  <tr><td><code>n</code></td><td>5</td><td>Number of results</td></tr>
+  <tr><td><code>hybrid</code></td><td>false</td><td>Blend semantic vectors + BM25 scores (Reciprocal Rank Fusion)</td></tr>
+  <tr><td><code>lexical_only</code></td><td>false</td><td>Bypass vector embedder, execute pure BM25 search</td></tr>
+  <tr><td><code>guardrail</code></td><td>true</td><td>Enable FST toxic term scanning and automatic query blocking</td></tr>
+  <tr><td><code>role</code></td><td>organize</td><td><code>organize</code> (768d local) or <code>retrieve</code> (1536d OpenAI)</td></tr>
+  <tr><td><code>time_weight</code></td><td>0.0</td><td>Blend semantic + recency score (0–1)</td></tr>
+  <tr><td><code>decay_halflife_hours</code></td><td>168</td><td>Recency decay half-life in hours</td></tr>
+  <tr><td><code>include_nearby</code></td><td>false</td><td>Return temporally adjacent chunks</td></tr>
+  <tr><td><code>agent_id</code></td><td>—</td><td>Agent ID for encrypted search</td></tr>
+  <tr><td><code>openai_api_key</code></td><td>—</td><td>Per-request OpenAI key for <code>retrieve</code> role (overrides server key)</td></tr>
+</table>
+</div>
+
+<!-- Environment -->
+<h2>Environment</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
+  <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
+  <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
+  <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables OpenAI completions and retrieve embeddings</td></tr>
+  <tr><td><code>ANTHROPIC_API_KEY</code></td><td>—</td><td>Enables Anthropic completions and GhostAgent loops</td></tr>
+  <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Gateway requires auth</td></tr>
+  <tr><td><code>NUTS_AUTH_VALIDATE_URL</code></td><td>https://auth.nuts.services/api/validate</td><td>API token validation endpoint</td></tr>
+</table>
+</div>
+
+<!-- Stack -->
+<h2>Stack</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Layer</th><th>Choice</th></tr>
+  <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
+  <tr><td>Cognition</td><td>GhostAgent cognitive RAG turn loop (OpenAI / Anthropic compat)</td></tr>
+  <tr><td>MCP Server</td><td>HTTP/SSE JSON-RPC 2.0 Model Context Protocol transport layer</td></tr>
+  <tr><td>Hybrid Index</td><td>Tantivy FST deterministic phrase engine + BM25F field indexer</td></tr>
+  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
+  <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
+  <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
+  <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>
+</table>
+</div>
+
+<!-- Footer links -->
+<div class="links">
+  <a href="/health">Health JSON</a>
+</div>
+
+<footer class="nuts-footer">
+  <div class="nuts-footer-inner">
+    <div class="nuts-footer-left">
+      <svg class="nuts-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <polygon points="16,2.5 27.5,9 27.5,23 16,29.5 4.5,23 4.5,9" fill="#e8a020"/>
+        <circle cx="16" cy="16" r="5.5" fill="#0a0a10"/>
+      </svg>
+      <span class="nuts-wordmark">NUTS SERVICES</span>
+      <span class="nuts-sep">&middot;</span>
+      <a class="nuts-dbd" href="https://deepbluedynamics.com">DeepBlue Dynamics, LLC</a>
+    </div>
+    <div class="nuts-footer-right">
+      <a href="https://auth.nuts.services/dashboard">Auth Dashboard</a>
+      <a href="https://auth.nuts.services">Auth</a>
+      <a href="https://github.com/DeepBlueDynamics/shivvr" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+<style>
+.nuts-footer { border-top:1px solid rgba(232,160,32,.18); padding:22px 28px; margin-top:32px;
+  font-family:'JetBrains Mono',ui-monospace,Menlo,monospace; font-size:12px;
+  color:rgba(255,255,255,.55); letter-spacing:.04em; background:transparent; }
+.nuts-footer-inner { max-width:1140px; margin:0 auto; display:flex; align-items:center;
+  justify-content:space-between; gap:18px; flex-wrap:wrap; }
+.nuts-footer-left { display:flex; align-items:center; gap:11px; }
+.nuts-mark { width:18px; height:18px; flex:none; }
+.nuts-wordmark { letter-spacing:.18em; font-weight:700; color:#e8a020; text-transform:uppercase; }
+.nuts-sep { color:rgba(232,160,32,.45); }
+.nuts-dbd { color:inherit; text-decoration:none; border-bottom:1px solid transparent; transition:color .15s,border-color .15s; }
+.nuts-dbd:hover { color:#e8a020; border-bottom-color:rgba(232,160,32,.55); }
+.nuts-footer-right { display:flex; align-items:center; gap:20px; text-transform:uppercase; }
+.nuts-footer-right a { color:inherit; text-decoration:none; letter-spacing:.12em;
+  border-bottom:1px solid transparent; transition:color .15s,border-color .15s; }
+.nuts-footer-right a:hover { color:#e8a020; border-bottom-color:rgba(232,160,32,.55); }
+@media(max-width:560px) { .nuts-footer-inner { justify-content:center; text-align:center; } }
+</style>
+
+</body>
+</html>

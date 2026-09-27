@@ -7,10 +7,17 @@ services:
       - PORT=8080
       - MODEL_PATH=/models/gtr-t5-base.onnx
       - TOKENIZER_PATH=/models/tokenizer.json
+      - VISION_MODEL_PATH=/models/siglip-vision.onnx
+      - TRANSCRIPTION_URL=http://hyperia-transcription:8765
       - LD_LIBRARY_PATH=/usr/lib/onnxruntime
       - OPENAI_API_KEY
       # Optional: set NUTS_AUTH_JWKS_URL to enable authentication
       # - NUTS_AUTH_JWKS_URL=
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - transcription_net
     restart: unless-stopped
     deploy:
       resources:
@@ -24,3 +31,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+networks:
+  default:
+  transcription_net:
+    external: true
+    name: transcription_default

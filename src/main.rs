@@ -1,5 +1,5 @@
 #[cfg(feature = "ml")]
-use shivvr::{api, auth, chunker, crypto, embedder, inverter, openai, store, temp_store};
+use shivvr::{api, audio, auth, chunker, crypto, embedder, inverter, openai, store, temp_store, vision};
 #[cfg(feature = "ml")]
 use std::sync::Arc;
 #[cfg(feature = "ml")]
@@ -132,6 +132,23 @@ async fn main() -> anyhow::Result<()> {
     let search_params = lume_hybrid::bm25::Bm25Params::default();
     let mcp_connections = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
+
+    let transcription_url = std::env::var("TRANSCRIPTION_URL").ok();
+    let audio_client = Arc::new(audio::AudioClient::new(transcription_url));
+
+    let vision_model_path = std::env::var("VISION_MODEL_PATH")
+        .unwrap_or_else(|_| "models/siglip-vision.onnx".to_string());
+    let vision_embedder = match vision::VisionEmbedder::new(&vision_model_path) {
+        Ok(v) => {
+            println!("SigLIP vision embedder loaded from {}", vision_model_path);
+            Some(Arc::new(v))
+        }
+        Err(e) => {
+            println!("Vision embedder not available: {} — image embedding disabled", e);
+            None
+        }
+    };
+
     let state = Arc::new(api::AppState {
         store,
         temp_store: temp_store.clone(),
@@ -140,6 +157,8 @@ async fn main() -> anyhow::Result<()> {
         openai_embedder,
         crypto,
         inverter,
+        audio_client,
+        vision_embedder,
         start_time: std::time::Instant::now(),
         nuts_auth,
         openai_auth_required,

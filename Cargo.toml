@@ -28,11 +28,14 @@ ort = { version = "=2.0.0-rc.11", features = ["download-binaries", "tls-native",
 tokenizers = { version = "0.21", optional = true }
 
 # HTTP client (OpenAI API)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"] }
 
 # Vector ops
 simsimd = { version = "6.5.12", optional = true }
 ndarray = "0.17"
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +43,7 @@ serde_json = "1"
 jsonwebtoken = "9"
 
 # Utils
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"

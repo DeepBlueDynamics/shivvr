@@ -1,8 +1,3 @@
-# Stage 1: Pull pre-built models from shivvr-models base image.
-# Rebuild models image only when export_gtr_models.py or deps change:
-#   gcloud builds submit --config cloudbuild-models.yaml --project gnosis-459403 .
-FROM gcr.io/gnosis-459403/shivvr-models:latest AS models
-
 # Stage 2: Rust build (CUDA)
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04 AS builder
 
@@ -40,12 +35,14 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/shivvr /shivvr
 COPY --from=builder /ort-libs /usr/lib/onnxruntime/
-COPY --from=models /models /models
+COPY models/ /models/
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
 ENV PORT=8080
 ENV MODEL_PATH=/models/gtr-t5-base.onnx
 ENV TOKENIZER_PATH=/models/tokenizer.json
+ENV VISION_MODEL_PATH=/models/siglip-vision.onnx
+ENV TRANSCRIPTION_URL=http://hyperia-transcription:8765
 ENV INVERTER_PROJECTION_PATH=/models/inverter/projection.onnx
 ENV INVERTER_ENCODER_PATH=/models/inverter/encoder.onnx
 ENV INVERTER_DECODER_PATH=/models/inverter/decoder.onnx

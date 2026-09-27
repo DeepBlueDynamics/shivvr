@@ -27,3 +27,6 @@ training/saves/
 training/saves-test/
 training/cache/
 training/**/__pycache__/
+
+# local agent tool config
+.nemesis8.toml

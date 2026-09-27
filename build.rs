@@ -13,9 +13,7 @@ fn main() {
 
         for name in &stubs {
             let lib_path = format!("{}\\{}.lib", out_dir, name);
-            if std::path::Path::new(&lib_path).exists() {
-                continue;
-            }
+            
 
             if let Some(ref lib_exe) = lib_exe {
                 // Use lib.exe to create a proper empty import library
@@ -52,6 +50,7 @@ fn main() {
 fn find_lib_exe() -> Option<String> {
     // Try common VS paths
     let paths = [
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\lib.exe",
         r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Tools\MSVC\14.16.27023\bin\Hostx64\x64\lib.exe",
         r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64\lib.exe",
         r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.38.33130\bin\Hostx64\x64\lib.exe",

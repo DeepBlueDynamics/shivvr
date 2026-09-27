@@ -26,6 +26,8 @@ pub struct AppState {
     pub openai_embedder: Option<Arc<OpenAIEmbedder>>,
     pub crypto: Arc<CryptoManager>,
     pub inverter: Option<Arc<Inverter>>,
+    pub audio_client: Arc<crate::audio::AudioClient>,
+    pub vision_embedder: Option<Arc<crate::vision::VisionEmbedder>>,
     pub start_time: std::time::Instant,
     pub nuts_auth: Option<Arc<NutsAuth>>,
     pub openai_auth_required: bool,
@@ -41,6 +43,7 @@ pub struct AppState {
 
 #[derive(Deserialize)]
 pub struct IngestRequest {
+    #[serde(default)]
     pub text: String,
     pub source: Option<String>,
     #[serde(default)]
@@ -58,6 +61,10 @@ pub struct IngestRequest {
     /// wants one vector representing the whole input window.
     #[serde(default)]
     pub mean_pool: bool,
+    /// Base64 encoded audio to transcribe via Docker service and embed
+    pub audio_base64: Option<String>,
+    /// Base64 encoded image to embed via SigLIP vision model
+    pub image_base64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -234,6 +241,8 @@ pub struct HealthResponse {
     pub uptime_seconds: u64,
     pub encryption_available: bool,
     pub inversion_available: bool,
+    pub audio_available: bool,
+    pub vision_available: bool,
     pub gpu: bool,
 }
 
@@ -241,6 +250,36 @@ pub struct HealthResponse {
 pub struct ErrorResponse {
     pub error: String,
 }
+
+#[derive(Deserialize)]
+pub struct AudioRequest {
+    pub audio_base64: String,
+}
+
+#[derive(Serialize)]
+pub struct AudioTranscribeResponse {
+    pub transcript: String,
+}
+
+#[derive(Serialize)]
+pub struct AudioEmbedResponse {
+    pub transcript: String,
+    pub embedding: Vec<f32>,
+    pub dimension: usize,
+}
+
+#[derive(Deserialize)]
+pub struct ImageEmbedRequest {
+    pub image_base64: String,
+}
+
+#[derive(Serialize)]
+pub struct ImageEmbedResponse {
+    pub embedding: Vec<f32>,
+    pub dimension: usize,
+    pub model: String,
+}
+
 
 // ===== Handlers =====
 
@@ -260,19 +299,104 @@ pub async fn ingest(
     let emotion_secondary = req.emotion_secondary.clone();
     let agent_id = req.agent_id.clone();
 
-    let mut chunks = state
-        .chunker
-        .chunk(&req.text, req.source, req.metadata)
-        .await
-        .map_err(|e| {
+    // 1. Process audio if audio_base64 provided
+    let mut text = req.text.clone();
+    let mut source = req.source.clone();
+
+    if let Some(ref audio_b64) = req.audio_base64 {
+        use base64::Engine;
+        let audio_bytes = base64::engine::general_purpose::STANDARD
+            .decode(audio_b64.trim())
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid audio_base64: {}", e),
+                    }),
+                )
+            })?;
+        let transcript = state.audio_client.transcribe(audio_bytes, None).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: format!("Audio transcription failed: {}", e),
                 }),
             )
         })?;
+        if text.is_empty() {
+            text = transcript;
+        } else {
+            text = format!("{}\n{}", text, transcript);
+        }
+        if source.is_none() {
+            source = Some("audio".to_string());
+        }
+    }
 
+    let mut chunks = if !text.trim().is_empty() {
+        state
+            .chunker
+            .chunk(&text, source.clone(), req.metadata.clone())
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
+    // 2. Process image if image_base64 provided
+    if let Some(ref img_b64) = req.image_base64 {
+        let vision = state.vision_embedder.as_ref().ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Vision embedder not loaded (models/siglip-vision.onnx not available)".to_string(),
+                }),
+            )
+        })?;
+        use base64::Engine;
+        let img_bytes = base64::engine::general_purpose::STANDARD
+            .decode(img_b64.trim())
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid image_base64: {}", e),
+                    }),
+                )
+            })?;
+        let img_emb = vision.embed_image(&img_bytes).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Vision embedding failed: {}", e),
+                }),
+            )
+        })?;
+        let img_chunk_id = format!("img_{}", uuid::Uuid::new_v4());
+        let img_text = if text.is_empty() { "[image]".to_string() } else { format!("[image] {}", text) };
+        let img_chunk = crate::store::Chunk {
+            id: img_chunk_id,
+            text: img_text,
+            embedding: img_emb,
+            embedding_retrieve: None,
+            token_count: 1,
+            source: Some("image".to_string()),
+            metadata: req.metadata.clone(),
+            created_at: chrono::Utc::now(),
+            emotion_primary: emotion_primary.clone(),
+            emotion_secondary: emotion_secondary.clone(),
+            encrypted: false,
+            agent_id: agent_id.clone(),
+        };
+        chunks.push(img_chunk);
+    }
     // Batch-embed with ada-002 — prefer caller-supplied key, fall back to server key
     let openai_for_request = req.openai_api_key
         .as_deref()
@@ -1043,6 +1167,18 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         });
     }
 
+    if state.vision_embedder.is_some() {
+        models.push(ModelInfo {
+            name: "siglip-base-patch16-224".to_string(),
+            role: "multimodal".to_string(),
+            dimension: 768,
+            status: "active".to_string(),
+        });
+    }
+
+    let audio_available = state.audio_client.health().await;
+    let vision_available = state.vision_embedder.is_some();
+
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1052,6 +1188,8 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         uptime_seconds: state.start_time.elapsed().as_secs(),
         encryption_available: true,
         inversion_available: state.inverter.is_some(),
+        audio_available,
+        vision_available,
         gpu: cfg!(feature = "cuda"),
     })
 }
@@ -2009,6 +2147,9 @@ fn is_free_operation(path: &str, method: &Method, query: Option<&str>, state: &A
         (&Method::GET, p) if p.starts_with("/temp/") && p.ends_with("/search") => {
             query_role(query) == "organize"
         }
+        (&Method::POST, "/audio/transcribe") => true,
+        (&Method::POST, "/audio/embed") => true,
+        (&Method::POST, "/image/embed") => true,
         _ => false,
     }
 }
@@ -2058,6 +2199,120 @@ async fn nuts_auth_gate(
     }
 }
 
+// ===== Audio & Image Handlers =====
+
+pub async fn audio_transcribe_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AudioRequest>,
+) -> Result<Json<AudioTranscribeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use base64::Engine;
+    let audio_bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.audio_base64.trim())
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid audio_base64: {}", e),
+                }),
+            )
+        })?;
+
+    let transcript = state.audio_client.transcribe(audio_bytes, None).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Audio transcription failed: {}", e),
+            }),
+        )
+    })?;
+
+    Ok(Json(AudioTranscribeResponse { transcript }))
+}
+
+pub async fn audio_embed_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AudioRequest>,
+) -> Result<Json<AudioEmbedResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use base64::Engine;
+    let audio_bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.audio_base64.trim())
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid audio_base64: {}", e),
+                }),
+            )
+        })?;
+
+    let transcript = state.audio_client.transcribe(audio_bytes, None).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Audio transcription failed: {}", e),
+            }),
+        )
+    })?;
+
+    let embedding = state.embedder.embed(&transcript).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Embedding failed: {}", e),
+            }),
+        )
+    })?;
+
+    let dimension = embedding.len();
+    Ok(Json(AudioEmbedResponse {
+        transcript,
+        embedding,
+        dimension,
+    }))
+}
+
+pub async fn image_embed_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ImageEmbedRequest>,
+) -> Result<Json<ImageEmbedResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let vision = state.vision_embedder.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Vision embedder not loaded (models/siglip-vision.onnx not available)".to_string(),
+            }),
+        )
+    })?;
+
+    use base64::Engine;
+    let img_bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.image_base64.trim())
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid image_base64: {}", e),
+                }),
+            )
+        })?;
+
+    let embedding = vision.embed_image(&img_bytes).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Vision embedding failed: {}", e),
+            }),
+        )
+    })?;
+
+    let dimension = embedding.len();
+    Ok(Json(ImageEmbedResponse {
+        embedding,
+        dimension,
+        model: "siglip-base-patch16-224".to_string(),
+    }))
+}
+
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -2078,6 +2333,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/:agent_id/encrypt", post(encrypt_embeddings))
         // Phase 3: Inversion endpoint
         .route("/invert", post(invert))
+        .route("/audio/transcribe", post(audio_transcribe_handler))
+        .route("/audio/embed", post(audio_embed_handler))
+        .route("/image/embed", post(image_embed_handler))
         .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate));
 
     // Register MCP & Agent endpoints without the authentication gate for seamless integration

@@ -1,4 +1,7 @@
+pub mod audio;
 pub mod auth;
+#[cfg(feature = "ml")]
+pub mod vision;
 #[cfg(feature = "ml")]
 pub mod api;
 #[cfg(feature = "ml")]
