@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir \
     "sentence-transformers==3.2.1" \
     "vec2text" \
     "onnx==1.16.2" \
-    "onnxruntime==1.19.2"
+    "onnxruntime==1.19.2" \n    "sentencepiece>=0.2.0" \n    "protobuf>=3.20,<5"
 
 COPY scripts/export_gtr_models.py /export_gtr_models.py
 COPY scripts/export_siglip.py /export_siglip.py
