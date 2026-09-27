@@ -9,6 +9,7 @@ pub mod agent;
 #[cfg(feature = "ml")]
 pub mod chunker;
 pub mod crypto;
+pub mod embed_api;
 #[cfg(feature = "ml")]
 pub mod embedder;
 #[cfg(feature = "ml")]

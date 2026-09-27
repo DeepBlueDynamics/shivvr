@@ -2150,6 +2150,8 @@ fn is_free_operation(path: &str, method: &Method, query: Option<&str>, state: &A
         (&Method::POST, "/audio/transcribe") => true,
         (&Method::POST, "/audio/embed") => true,
         (&Method::POST, "/image/embed") => true,
+        // Local GTR-T5 compute only, like /image/embed and organize-role ingest.
+        (&Method::POST, "/embed") => true,
         _ => false,
     }
 }
@@ -2313,6 +2315,58 @@ pub async fn image_embed_handler(
     }))
 }
 
+// ===== Plain text embedding =====
+
+/// `POST /embed`: GTR-T5 vectors for a batch of texts. Same vector the ingest
+/// paths store in `Chunk::embedding` (not `embedding_retrieve`). No session,
+/// store, or cache side effects. Texts are embedded one at a time inside a
+/// single blocking task: the embedder mean-pools without a padding mask, so
+/// padded batch inference would change the vectors.
+pub async fn embed_texts(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::embed_api::EmbedRequest>,
+) -> Result<Json<crate::embed_api::EmbedResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::embed_api::{validate, EmbedResponse, EMBED_DIM, EMBED_MODEL};
+    validate(&req).map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+
+    let embedder = state.embedder.clone();
+    let texts = req.texts;
+    let vectors = tokio::task::spawn_blocking(move || {
+        texts
+            .iter()
+            .map(|t| embedder.embed(t))
+            .collect::<anyhow::Result<Vec<Vec<f32>>>>()
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("embedding task failed: {e}") }),
+        )
+    })?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Embedding failed: {e}") }),
+        )
+    })?;
+
+    if let Some(bad) = vectors.iter().find(|v| v.len() != EMBED_DIM) {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("model returned {} dims, expected {EMBED_DIM}", bad.len()),
+            }),
+        ));
+    }
+
+    Ok(Json(EmbedResponse {
+        model: EMBED_MODEL.to_string(),
+        dim: EMBED_DIM,
+        vectors,
+    }))
+}
+
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -2336,6 +2390,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/audio/transcribe", post(audio_transcribe_handler))
         .route("/audio/embed", post(audio_embed_handler))
         .route("/image/embed", post(image_embed_handler))
+        .route("/embed", post(embed_texts))
         .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate));
 
     // Register MCP & Agent endpoints without the authentication gate for seamless integration
