@@ -31,7 +31,8 @@ pub fn timeout_budgets(raw: Option<&str>) -> (u64, u64) {
 
 /// Budgets from the process environment.
 pub fn request_timeouts() -> (std::time::Duration, std::time::Duration) {
-    let (heavy, light) = timeout_budgets(std::env::var("SHIVVR_REQUEST_TIMEOUT_SECS").ok().as_deref());
+    let (heavy, light) =
+        timeout_budgets(std::env::var("SHIVVR_REQUEST_TIMEOUT_SECS").ok().as_deref());
     (
         std::time::Duration::from_secs(heavy),
         std::time::Duration::from_secs(light),

@@ -111,17 +111,27 @@ mod tests {
 
     #[test]
     fn accepts_default_and_explicit_model() {
-        assert_eq!(validate(&req(vec!["hello"], None)).unwrap(), EmbedModel::GtrT5Base);
+        assert_eq!(
+            validate(&req(vec!["hello"], None)).unwrap(),
+            EmbedModel::GtrT5Base
+        );
         assert_eq!(
             validate(&req(vec!["a", "b"], Some("gtr-t5-base"))).unwrap(),
             EmbedModel::GtrT5Base
         );
-        assert_eq!(validate(&req(vec!["x"], Some(""))).unwrap(), EmbedModel::GtrT5Base);
+        assert_eq!(
+            validate(&req(vec!["x"], Some(""))).unwrap(),
+            EmbedModel::GtrT5Base
+        );
     }
 
     #[test]
     fn accepts_siglip_text_model() {
-        let model = validate(&req(vec!["a photo of a cat"], Some("siglip-base-patch16-224"))).unwrap();
+        let model = validate(&req(
+            vec!["a photo of a cat"],
+            Some("siglip-base-patch16-224"),
+        ))
+        .unwrap();
         assert_eq!(model, EmbedModel::SiglipText);
         assert_eq!(model.name(), SIGLIP_TEXT_MODEL);
         assert_eq!(model.dim(), 768);
@@ -151,11 +161,18 @@ mod tests {
         assert!(validate(&req(too_many, None)).is_err());
 
         let max = "a".repeat(MAX_TEXT_BYTES);
-        assert!(validate(&EmbedRequest { texts: vec![max], model: None }).is_ok());
+        assert!(validate(&EmbedRequest {
+            texts: vec![max],
+            model: None
+        })
+        .is_ok());
         let over = "a".repeat(MAX_TEXT_BYTES + 1);
-        assert!(validate(&EmbedRequest { texts: vec![over], model: None })
-            .unwrap_err()
-            .contains("bytes"));
+        assert!(validate(&EmbedRequest {
+            texts: vec![over],
+            model: None
+        })
+        .unwrap_err()
+        .contains("bytes"));
     }
 
     #[test]
