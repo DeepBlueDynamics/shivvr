@@ -2367,11 +2367,40 @@ pub async fn embed_texts(
     }))
 }
 
+// ===== Request timeouts =====
+
+/// Bound how long a handler may take to produce a response, so a hung
+/// inference cannot hold a connection forever. Streaming bodies (SSE) are not
+/// covered: the budget ends once the response starts. A blocking task that
+/// already started keeps running to completion; only the connection is
+/// released.
+async fn enforce_timeout(
+    State(budget): State<std::time::Duration>,
+    req: Request,
+    next: Next,
+) -> Response {
+    match tokio::time::timeout(budget, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(ErrorResponse {
+                error: format!(
+                    "request exceeded the {}s server timeout",
+                    budget.as_secs()
+                ),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
-    use crate::limits::{EMBED_BODY_LIMIT_BYTES, MEDIA_BODY_LIMIT_BYTES};
+    use crate::limits::{request_timeouts, EMBED_BODY_LIMIT_BYTES, MEDIA_BODY_LIMIT_BYTES};
     use axum::extract::DefaultBodyLimit;
+
+    let (heavy_timeout, light_timeout) = request_timeouts();
 
     // Routes carrying base64 media need more than axum's 2 MiB default, or a
     // single rendered page / a minute of audio is rejected with 413.
@@ -2381,11 +2410,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/audio/transcribe", post(audio_transcribe_handler))
         .route("/audio/embed", post(audio_embed_handler))
         .route("/image/embed", post(image_embed_handler))
-        .route_layer(DefaultBodyLimit::max(MEDIA_BODY_LIMIT_BYTES));
+        .route_layer(DefaultBodyLimit::max(MEDIA_BODY_LIMIT_BYTES))
+        .route_layer(middleware::from_fn_with_state(heavy_timeout, enforce_timeout));
 
     let embed_routes = Router::new()
         .route("/embed", post(embed_texts))
-        .route_layer(DefaultBodyLimit::max(EMBED_BODY_LIMIT_BYTES));
+        .route_layer(DefaultBodyLimit::max(EMBED_BODY_LIMIT_BYTES))
+        .route_layer(middleware::from_fn_with_state(heavy_timeout, enforce_timeout));
+
+    // Inversion is a decode loop; it shares the heavy budget.
+    let invert_routes = Router::new()
+        .route("/invert", post(invert))
+        .route_layer(middleware::from_fn_with_state(heavy_timeout, enforce_timeout));
 
     let r = Router::new()
         .route("/", get(homepage))
@@ -2400,10 +2436,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/:agent_id/register", post(register_agent))
         .route("/agent/:agent_id/decrypt", post(decrypt_embeddings))
         .route("/agent/:agent_id/encrypt", post(encrypt_embeddings))
-        // Phase 3: Inversion endpoint
-        .route("/invert", post(invert))
+        // route_layer only covers routes added above; the merged groups keep
+        // their own (heavy) budget. MCP/SSE and agent chat stay unbounded.
+        .route_layer(middleware::from_fn_with_state(light_timeout, enforce_timeout))
         .merge(media_routes)
         .merge(embed_routes)
+        .merge(invert_routes)
         .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate));
 
     // Register MCP & Agent endpoints without the authentication gate for seamless integration

@@ -150,7 +150,8 @@ each at most 32 KiB) and returns `{"model", "dim", "vectors"}`.
 | `/embed` | 8 MiB | 256 texts × 32 KiB |
 | everything else | 2 MiB | axum default |
 
-Requests over the limit are rejected with `413 Payload Too Large`.
+Requests over the limit are rejected with `413 Payload Too Large`. Handlers
+that exceed the server timeout (see `SHIVVR_REQUEST_TIMEOUT_SECS`) get `408`.
 
 ### Ingest
 
@@ -192,6 +193,7 @@ curl "http://localhost:8080/sessions/my-session/search?q=marina&role=retrieve"
 | `INVERTER_ENCODER_PATH` | `models/inverter/encoder.onnx` | Vec2text T5 encoder |
 | `INVERTER_DECODER_PATH` | `models/inverter/decoder.onnx` | Vec2text T5 decoder |
 | `INVERTER_TOKENIZER_PATH` | `models/inverter/tokenizer.json` | Vec2text tokenizer |
+| `SHIVVR_REQUEST_TIMEOUT_SECS` | `120` | Server-side timeout for inference routes (`/embed`, `/image/embed`, `/audio/*`, ingest, `/invert`); other routes use `min(30, this)`. Timed-out requests get `408` with `{"error": ...}` |
 
 ## Search query parameters
 
