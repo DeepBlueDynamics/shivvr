@@ -17,7 +17,10 @@ RUN pip install --no-cache-dir \
     "onnxruntime==1.19.2"
 
 COPY scripts/export_gtr_models.py /export_gtr_models.py
+COPY scripts/export_siglip.py /export_siglip.py
 
 RUN python /export_gtr_models.py --output_dir /models
+# SigLIP vision + text towers and the fast tokenizer JSON (~1.6 GB download).
+RUN python /export_siglip.py --output_dir /models
 
 CMD ["echo", "models ready"]

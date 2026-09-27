@@ -4,7 +4,8 @@ Export google/siglip-base-patch16-224 (vision + text) to ONNX.
 Produces:
   models/siglip-vision.onnx  — vision encoder (image tensor [1, 3, 224, 224] -> 768d normalized vector)
   models/siglip-text.onnx    — text encoder (input_ids [1, seq] -> 768d normalized vector)
-  models/siglip-tokenizer/   — SigLIP tokenizer config/vocab
+  models/siglip-tokenizer/   — SigLIP tokenizer config/vocab (slow, sentencepiece)
+  models/siglip-tokenizer.json — fast-tokenizer JSON loaded by the Rust service
 """
 
 import argparse
@@ -94,6 +95,21 @@ def export_siglip(output_dir: Path, model_id: str = "google/siglip-base-patch16-
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.save_pretrained(str(tokenizer_dir))
     print("==> Tokenizer saved")
+
+    # The Rust `tokenizers` crate can only load the fast-tokenizer JSON; the
+    # slow SigLIP tokenizer above writes spiece.model only. Convert it so the
+    # service can serve the text tower (POST /embed model=siglip-base-patch16-224).
+    fast_path = output_dir / "siglip-tokenizer.json"
+    try:
+        if hasattr(tokenizer, "backend_tokenizer"):
+            fast = tokenizer.backend_tokenizer
+        else:
+            from transformers.convert_slow_tokenizer import convert_slow_tokenizer
+            fast = convert_slow_tokenizer(tokenizer)
+        fast.save(str(fast_path))
+        print(f"==> Fast tokenizer saved to {fast_path}")
+    except Exception as e:
+        print(f"WARNING: could not write {fast_path} ({e}); the SigLIP text tower will be unavailable")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

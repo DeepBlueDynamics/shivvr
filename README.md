@@ -62,6 +62,8 @@ Manual export:
 ```bash
 pip install torch transformers sentence-transformers vec2text onnx onnxruntime
 python scripts/export_gtr_models.py --output_dir models/ --verify
+# SigLIP vision + text towers (for /image/embed and /embed model=siglip-base-patch16-224)
+python scripts/export_siglip.py --output_dir models/
 ```
 
 ## Quick start
@@ -140,7 +142,10 @@ decoded length per pass. (Requires the inverter models — see the
 | POST | `/audio/transcribe` | Transcript only |
 
 `POST /embed` takes `{"texts": [...], "model": "gtr-t5-base"}` (1–256 texts,
-each at most 32 KiB) and returns `{"model", "dim", "vectors"}`.
+each at most 32 KiB) and returns `{"model", "dim", "vectors"}`. Pass
+`"model": "siglip-base-patch16-224"` to get SigLIP text vectors (768d) in the
+same space as `/image/embed`, for text-to-image comparison; the service answers
+`503` if the SigLIP text tower or its tokenizer is not loaded (check `/health`).
 
 ### Request limits
 
@@ -193,6 +198,9 @@ curl "http://localhost:8080/sessions/my-session/search?q=marina&role=retrieve"
 | `INVERTER_ENCODER_PATH` | `models/inverter/encoder.onnx` | Vec2text T5 encoder |
 | `INVERTER_DECODER_PATH` | `models/inverter/decoder.onnx` | Vec2text T5 decoder |
 | `INVERTER_TOKENIZER_PATH` | `models/inverter/tokenizer.json` | Vec2text tokenizer |
+| `VISION_MODEL_PATH` | `models/siglip-vision.onnx` | SigLIP vision tower (`/image/embed`) |
+| `SIGLIP_TEXT_MODEL_PATH` | `models/siglip-text.onnx` | SigLIP text tower (`/embed` model=siglip-base-patch16-224) |
+| `SIGLIP_TOKENIZER_PATH` | `models/siglip-tokenizer.json` | Fast-tokenizer JSON for the SigLIP text tower |
 | `SHIVVR_REQUEST_TIMEOUT_SECS` | `120` | Server-side timeout for inference routes (`/embed`, `/image/embed`, `/audio/*`, ingest, `/invert`); other routes use `min(30, this)`. Timed-out requests get `408` with `{"error": ...}` |
 
 ## Search query parameters

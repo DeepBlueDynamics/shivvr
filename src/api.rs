@@ -28,6 +28,9 @@ pub struct AppState {
     pub inverter: Option<Arc<Inverter>>,
     pub audio_client: Arc<crate::audio::AudioClient>,
     pub vision_embedder: Option<Arc<crate::vision::VisionEmbedder>>,
+    /// SigLIP text tower (same space as `vision_embedder`); `None` when the
+    /// ONNX or tokenizer file is missing.
+    pub siglip_text: Option<Arc<crate::vision::SiglipTextEmbedder>>,
     pub start_time: std::time::Instant,
     pub nuts_auth: Option<Arc<NutsAuth>>,
     pub openai_auth_required: bool,
@@ -1176,6 +1179,15 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         });
     }
 
+    if state.siglip_text.is_some() {
+        models.push(ModelInfo {
+            name: "siglip-base-patch16-224".to_string(),
+            role: "multimodal-text".to_string(),
+            dimension: 768,
+            status: "active".to_string(),
+        });
+    }
+
     let audio_available = state.audio_client.health().await;
     let vision_available = state.vision_embedder.is_some();
 
@@ -2317,52 +2329,80 @@ pub async fn image_embed_handler(
 
 // ===== Plain text embedding =====
 
-/// `POST /embed`: GTR-T5 vectors for a batch of texts. Same vector the ingest
-/// paths store in `Chunk::embedding` (not `embedding_retrieve`). No session,
-/// store, or cache side effects. Texts are embedded one at a time inside a
-/// single blocking task: the embedder mean-pools without a padding mask, so
-/// padded batch inference would change the vectors.
+/// `POST /embed`: vectors for a batch of texts. No session, store, or cache
+/// side effects. `model` picks the space:
+/// - `gtr-t5-base` (default): the vector the ingest paths store in
+///   `Chunk::embedding`. Texts are embedded one at a time inside a single
+///   blocking task: the embedder mean-pools without a padding mask, so padded
+///   batch inference would change the vectors.
+/// - `siglip-base-patch16-224`: the SigLIP text tower, same space as
+///   `POST /image/embed`, for text-to-image comparison. 503 when the tower or
+///   its tokenizer is not loaded.
 pub async fn embed_texts(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::embed_api::EmbedRequest>,
 ) -> Result<Json<crate::embed_api::EmbedResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use crate::embed_api::{validate, EmbedResponse, EMBED_DIM, EMBED_MODEL};
-    validate(&req).map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
-
-    let embedder = state.embedder.clone();
+    use crate::embed_api::{validate, EmbedModel, EmbedResponse};
+    let model = validate(&req).map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     let texts = req.texts;
-    let vectors = tokio::task::spawn_blocking(move || {
-        texts
-            .iter()
-            .map(|t| embedder.embed(t))
-            .collect::<anyhow::Result<Vec<Vec<f32>>>>()
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: format!("embedding task failed: {e}") }),
-        )
-    })?
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: format!("Embedding failed: {e}") }),
-        )
-    })?;
+    let expected_dim = model.dim();
 
-    if let Some(bad) = vectors.iter().find(|v| v.len() != EMBED_DIM) {
+    let joined = match model {
+        EmbedModel::GtrT5Base => {
+            let embedder = state.embedder.clone();
+            tokio::task::spawn_blocking(move || {
+                texts
+                    .iter()
+                    .map(|t| embedder.embed(t))
+                    .collect::<anyhow::Result<Vec<Vec<f32>>>>()
+            })
+            .await
+        }
+        EmbedModel::SiglipText => {
+            let siglip = state.siglip_text.clone().ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: "SigLIP text tower not loaded (models/siglip-text.onnx or models/siglip-tokenizer.json not available)".to_string(),
+                    }),
+                )
+            })?;
+            tokio::task::spawn_blocking(move || {
+                texts
+                    .iter()
+                    .map(|t| siglip.embed_text(t))
+                    .collect::<anyhow::Result<Vec<Vec<f32>>>>()
+            })
+            .await
+        }
+    };
+
+    let vectors = joined
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("embedding task failed: {e}") }),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("Embedding failed: {e}") }),
+            )
+        })?;
+
+    if let Some(bad) = vectors.iter().find(|v| v.len() != expected_dim) {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("model returned {} dims, expected {EMBED_DIM}", bad.len()),
+                error: format!("model returned {} dims, expected {expected_dim}", bad.len()),
             }),
         ));
     }
 
     Ok(Json(EmbedResponse {
-        model: EMBED_MODEL.to_string(),
-        dim: EMBED_DIM,
+        model: model.name().to_string(),
+        dim: expected_dim,
         vectors,
     }))
 }

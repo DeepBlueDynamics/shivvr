@@ -181,6 +181,9 @@ Set at deploy time via `--set-env-vars` or the Cloud Run console. Current requir
 | `PORT` | `8080` | Set by Cloud Run automatically |
 | `MODEL_PATH` | `/models/gtr-t5-base.onnx` | Baked into image |
 | `TOKENIZER_PATH` | `/models/tokenizer.json` | Baked into image |
+| `VISION_MODEL_PATH` | `/models/siglip-vision.onnx` | Baked into image |
+| `SIGLIP_TEXT_MODEL_PATH` | `/models/siglip-text.onnx` | Baked into image |
+| `SIGLIP_TOKENIZER_PATH` | `/models/siglip-tokenizer.json` | Baked into image; written by `scripts/export_siglip.py` |
 | `LD_LIBRARY_PATH` | `/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime` | Set in Dockerfile |
 
 Optional vars (set in Cloud Run console or via `--set-env-vars`):

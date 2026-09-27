@@ -149,6 +149,29 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // SigLIP text tower: same space as the vision embedder, served through
+    // `POST /embed` with model=siglip-base-patch16-224.
+    let siglip_text_model_path = std::env::var("SIGLIP_TEXT_MODEL_PATH")
+        .unwrap_or_else(|_| "models/siglip-text.onnx".to_string());
+    let siglip_tokenizer_path = std::env::var("SIGLIP_TOKENIZER_PATH")
+        .unwrap_or_else(|_| "models/siglip-tokenizer.json".to_string());
+    let siglip_text = match vision::SiglipTextEmbedder::new(&siglip_text_model_path, &siglip_tokenizer_path) {
+        Ok(t) => {
+            println!(
+                "SigLIP text embedder loaded from {} (tokenizer {})",
+                siglip_text_model_path, siglip_tokenizer_path
+            );
+            Some(Arc::new(t))
+        }
+        Err(e) => {
+            println!(
+                "SigLIP text embedder not available: {} — /embed model=siglip-base-patch16-224 disabled",
+                e
+            );
+            None
+        }
+    };
+
     let state = Arc::new(api::AppState {
         store,
         temp_store: temp_store.clone(),
@@ -159,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         inverter,
         audio_client,
         vision_embedder,
+        siglip_text,
         start_time: std::time::Instant::now(),
         nuts_auth,
         openai_auth_required,
