@@ -10,6 +10,7 @@ pub mod agent;
 pub mod chunker;
 pub mod crypto;
 pub mod embed_api;
+pub mod limits;
 #[cfg(feature = "ml")]
 pub mod embedder;
 #[cfg(feature = "ml")]

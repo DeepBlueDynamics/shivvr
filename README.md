@@ -130,6 +130,28 @@ the final wording still differs from the original. Use `max_length` to bound the
 decoded length per pass. (Requires the inverter models — see the
 `INVERTER_*` env vars; otherwise `/invert` returns `503`.)
 
+### Embed
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/embed` | Batched text vectors, no store side effects |
+| POST | `/image/embed` | SigLIP image vector (768d) from `image_base64` |
+| POST | `/audio/embed` | Transcribe `audio_base64`, then embed the transcript (GTR, 768d) |
+| POST | `/audio/transcribe` | Transcript only |
+
+`POST /embed` takes `{"texts": [...], "model": "gtr-t5-base"}` (1–256 texts,
+each at most 32 KiB) and returns `{"model", "dim", "vectors"}`.
+
+### Request limits
+
+| Routes | Max body | Notes |
+|--------|----------|-------|
+| `/sessions/:id/ingest`, `/temp/:name/ingest`, `/image/embed`, `/audio/*` | 32 MiB | base64 media payloads |
+| `/embed` | 8 MiB | 256 texts × 32 KiB |
+| everything else | 2 MiB | axum default |
+
+Requests over the limit are rejected with `413 Payload Too Large`.
+
 ### Ingest
 
 ```bash

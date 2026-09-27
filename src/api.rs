@@ -2370,14 +2370,29 @@ pub async fn embed_texts(
 // ===== Router =====
 
 pub fn router(state: Arc<AppState>) -> Router {
+    use crate::limits::{EMBED_BODY_LIMIT_BYTES, MEDIA_BODY_LIMIT_BYTES};
+    use axum::extract::DefaultBodyLimit;
+
+    // Routes carrying base64 media need more than axum's 2 MiB default, or a
+    // single rendered page / a minute of audio is rejected with 413.
+    let media_routes = Router::new()
+        .route("/sessions/:session_id/ingest", post(ingest))
+        .route("/temp/:name/ingest", post(temp_ingest))
+        .route("/audio/transcribe", post(audio_transcribe_handler))
+        .route("/audio/embed", post(audio_embed_handler))
+        .route("/image/embed", post(image_embed_handler))
+        .route_layer(DefaultBodyLimit::max(MEDIA_BODY_LIMIT_BYTES));
+
+    let embed_routes = Router::new()
+        .route("/embed", post(embed_texts))
+        .route_layer(DefaultBodyLimit::max(EMBED_BODY_LIMIT_BYTES));
+
     let r = Router::new()
         .route("/", get(homepage))
         .route("/health", get(health))
-        .route("/sessions/:session_id/ingest", post(ingest))
         .route("/sessions/:session_id/search", get(search))
         .route("/sessions/:session_id", get(session_info).delete(delete_session))
         .route("/temp", get(list_temp_stores))
-        .route("/temp/:name/ingest", post(temp_ingest))
         .route("/temp/:name/search", get(temp_search))
         .route("/temp/:name/dump", get(temp_dump))
         .route("/temp/:name", delete(delete_temp_store))
@@ -2387,10 +2402,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/:agent_id/encrypt", post(encrypt_embeddings))
         // Phase 3: Inversion endpoint
         .route("/invert", post(invert))
-        .route("/audio/transcribe", post(audio_transcribe_handler))
-        .route("/audio/embed", post(audio_embed_handler))
-        .route("/image/embed", post(image_embed_handler))
-        .route("/embed", post(embed_texts))
+        .merge(media_routes)
+        .merge(embed_routes)
         .layer(middleware::from_fn_with_state(state.clone(), nuts_auth_gate));
 
     // Register MCP & Agent endpoints without the authentication gate for seamless integration
