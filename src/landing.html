@@ -212,8 +212,13 @@
   <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
+  <tr><td class="method">POST</td><td><code>/embed</code></td><td>Batched text vectors, no store side effects (GTR-T5 768d; <code>model=siglip-base-patch16-224</code> for the SigLIP text space)</td></tr>
+  <tr><td class="method">POST</td><td><code>/image/embed</code></td><td>SigLIP image vector (768d) from <code>image_base64</code>; same space as SigLIP text</td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/transcribe</code></td><td>Transcript from <code>audio_base64</code> via the transcription service</td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/embed</code></td><td>Transcript + GTR-T5 vector from <code>audio_base64</code></td></tr>
 </table>
 </div>
+<p class="hint">Request limits: 32 MiB bodies on image, audio and ingest routes, 8 MiB on <code>/embed</code>, 2 MiB elsewhere; 120 s server timeout on inference routes, 30 s on the rest.</p>
 
 <!-- Quick start -->
 <h2 id="quickstart">Quick start</h2>
