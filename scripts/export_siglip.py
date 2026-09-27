@@ -96,20 +96,84 @@ def export_siglip(output_dir: Path, model_id: str = "google/siglip-base-patch16-
     tokenizer.save_pretrained(str(tokenizer_dir))
     print("==> Tokenizer saved")
 
-    # The Rust `tokenizers` crate can only load the fast-tokenizer JSON; the
-    # slow SigLIP tokenizer above writes spiece.model only. Convert it so the
-    # service can serve the text tower (POST /embed model=siglip-base-patch16-224).
+    # The Rust `tokenizers` crate can only load the fast-tokenizer JSON. transformers
+    # has no slow->fast converter for SiglipTokenizer, so build it directly from
+    # spiece.model and verify it reproduces the slow tokenizer before writing it.
     fast_path = output_dir / "siglip-tokenizer.json"
-    try:
-        if hasattr(tokenizer, "backend_tokenizer"):
-            fast = tokenizer.backend_tokenizer
-        else:
-            from transformers.convert_slow_tokenizer import convert_slow_tokenizer
-            fast = convert_slow_tokenizer(tokenizer)
-        fast.save(str(fast_path))
-        print(f"==> Fast tokenizer saved to {fast_path}")
-    except Exception as e:
-        print(f"WARNING: could not write {fast_path} ({e}); the SigLIP text tower will be unavailable")
+    fast = build_fast_siglip_tokenizer(tokenizer_dir / "spiece.model")
+    verify_fast_tokenizer(fast, tokenizer)
+    fast.save(str(fast_path))
+    print(f"==> Fast tokenizer saved to {fast_path}")
+
+
+SAMPLE_TEXTS = [
+    "A photo of a cat.",
+    "Two dogs playing in the snow!",
+    "The Quick, Brown Fox; jumps over the lazy dog?",
+    "hello   world",
+    "Diagram of a UDP connection checker (2026-09-27)",
+    "",
+]
+
+
+def build_fast_siglip_tokenizer(spm_path: Path):
+    """Fast tokenizer equivalent to transformers' SiglipTokenizer.
+
+    SiglipTokenizer canonicalizes text before SentencePiece: it strips ASCII
+    punctuation (string.punctuation), collapses whitespace, strips, lowercases,
+    then encodes with the unigram model and appends </s> (id 1). Padding is
+    handled by the service (pads with </s> to 64 tokens).
+    """
+    import string
+    from tokenizers import Regex, normalizers, processors
+    from tokenizers.implementations import SentencePieceUnigramTokenizer
+    import sys
+    if "sentencepiece_model_pb2" not in sys.modules:
+        # from_spm() imports a top-level sentencepiece_model_pb2; the pip package ships it as a submodule.
+        # Use the copy transformers already registered with protobuf; importing the
+        # sentencepiece package's copy as well raises a duplicate-proto error.
+        _spm_pb2 = None
+        try:
+            from transformers.convert_slow_tokenizer import import_protobuf  # transformers 4.4x
+            _spm_pb2 = import_protobuf()
+        except Exception:
+            from sentencepiece import sentencepiece_model_pb2 as _spm_pb2  # standalone fallback
+        sys.modules["sentencepiece_model_pb2"] = _spm_pb2
+
+    fast = SentencePieceUnigramTokenizer.from_spm(str(spm_path))
+    punct_class = "[" + "".join("\\" + c for c in string.punctuation) + "]"
+    canonicalize = [
+        normalizers.Replace(Regex(punct_class), ""),
+        normalizers.Replace(Regex("\\s+"), " "),
+        normalizers.Strip(),
+        normalizers.Lowercase(),
+    ]
+    existing = fast.normalizer
+    fast.normalizer = normalizers.Sequence(canonicalize + ([existing] if existing is not None else []))
+    eos_id = fast.token_to_id("</s>")
+    if eos_id is None:
+        raise RuntimeError("spiece.model has no </s> token")
+    fast.post_processor = processors.TemplateProcessing(
+        single="$A </s>",
+        pair="$A </s> $B </s>",
+        special_tokens=[("</s>", eos_id)],
+    )
+    return fast
+
+
+def verify_fast_tokenizer(fast, slow) -> None:
+    """Fail loudly if the fast tokenizer disagrees with the slow one on samples."""
+    mismatches = []
+    for text in SAMPLE_TEXTS:
+        expected = slow(text, add_special_tokens=True, padding=False, truncation=False)["input_ids"]
+        got = fast.encode(text, add_special_tokens=True).ids
+        if list(expected) != list(got):
+            mismatches.append((text, expected, got))
+    if mismatches:
+        for text, expected, got in mismatches:
+            print(f"  MISMATCH {text!r}: slow={expected} fast={got}")
+        raise RuntimeError(f"fast SigLIP tokenizer disagrees with the slow one on {len(mismatches)} sample(s)")
+    print(f"==> Fast tokenizer verified against SiglipTokenizer on {len(SAMPLE_TEXTS)} samples")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -5,7 +5,7 @@ name = "shivvr"
 # Single source of truth for the shivvr version. Bump here only.
 # Health endpoint, homepage header, and MCP serverInfo all read this via
 # env!("CARGO_PKG_VERSION"). No other file references the version string.
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 
 [features]
