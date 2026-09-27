@@ -7,6 +7,12 @@ SERVICE="shivvr"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}"
 MODELS_IMAGE="gcr.io/${PROJECT_ID}/shivvr-models"
 
+# Version comes from Cargo.toml, the single source of truth (see OPERATIONS.md -> Versioning).
+# Images are pushed as :v<version> and :latest so a revision can always be traced to a tag.
+VERSION="$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -1)"
+TAG="v${VERSION}"
+echo "==> Releasing ${SERVICE} ${TAG}"
+
 # Rebuild models image only when needed (export script or pip deps changed).
 # Normal code deploys skip this — models are already baked into shivvr-models:latest.
 if [[ "$1" == "--rebuild-models" ]]; then
@@ -21,16 +27,18 @@ fi
 
 echo "==> Building and pushing app image via Cloud Build..."
 gcloud builds submit \
-  --tag "${IMAGE}:latest" \
+  --tag "${IMAGE}:${TAG}" \
   --project "${PROJECT_ID}" \
   --timeout 20m \
   .
 
-echo "==> Deploying ${SERVICE} to Cloud Run (L4 GPU)..."
+gcloud container images add-tag -q "${IMAGE}:${TAG}" "${IMAGE}:latest" --project "${PROJECT_ID}"
+
+echo "==> Deploying ${SERVICE} ${TAG} to Cloud Run (L4 GPU)..."
 # NUTS_AUTH_JWKS_URL turns on the auth gate. Without it shivvr boots in
 # "dev mode" with all endpoints public — fine locally, dangerous in prod.
 gcloud run deploy "${SERVICE}" \
-  --image "${IMAGE}:latest" \
+  --image "${IMAGE}:${TAG}" \
   --region "${REGION}" \
   --project "${PROJECT_ID}" \
   --platform managed \

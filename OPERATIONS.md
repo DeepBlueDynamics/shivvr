@@ -56,6 +56,29 @@ gcloud run services describe shivvr --region us-central1 \
 
 ---
 
+## Versioning & releases
+
+- **Single source of truth:** `version` in `Cargo.toml`. `/health` and the homepage report it via `CARGO_PKG_VERSION`.
+- **Tag every release** with `v<version>` on the commit you shipped (`git tag -a v0.3.0`). The GitHub Actions workflow refuses a tag that does not match `Cargo.toml`.
+- **Images per release:**
+  - `gcr.io/$PROJECT_ID/shivvr:v<version>` (+ `:latest`) — the CUDA app image, built by `deploy.sh` on Cloud Build. It stays on Cloud Build because it copies the gitignored `models/` directory (~2.2 GB of ONNX files) into the image.
+  - `ghcr.io/deepbluedynamics/shivvr-gateway:<version>` (+ `:v<version>`, `:latest`) — the GPU-less gateway, built by `.github/workflows/release.yml` on every `v*` tag push. Also pushed to Docker Hub as `deepbluedynamics/shivvr-gateway` when the repo has `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets.
+
+Cutting a release:
+
+```bash
+# 1. bump the version
+sed -i 's/^version = ".*"/version = "0.4.0"/' Cargo.toml
+git commit -am "release v0.4.0: <summary>"
+git tag -a v0.4.0 -m "v0.4.0"
+git push origin main --tags          # triggers the gateway image build
+
+# 2. build + deploy the CUDA app image (manual, Cloud Build)
+bash deploy.sh                       # pushes gcr.io/$PROJECT_ID/shivvr:v0.4.0 and :latest, deploys it
+```
+
+---
+
 ## Deploy
 
 Full build + deploy from source (runs in Cloud Build — no local Docker or models needed):
