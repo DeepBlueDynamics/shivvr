@@ -48,23 +48,34 @@ sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart doc
 
 **Windows:** Docker Desktop with WSL 2 backend includes GPU support automatically.
 
-### Export ONNX Models
+### Models
 
-Models are not in the repo. Run once before building the Docker image:
+Models are not in the repo. The full set is about 2.2 GB: GTR-T5-base, the vec2text
+inverter, the SigLIP vision and text towers, and the SigLIP tokenizer JSON. They come
+from a prebuilt image, `gcr.io/gnosis-459403/shivvr-models:latest`, which
+`Dockerfile.models` produces and the app `Dockerfile` copies `/models` from. Rebuild
+that image only when the export scripts change:
 
 ```bash
-bash scripts/fetch_models.sh
+bash deploy.sh --rebuild-models    # Cloud Build, about 12 minutes
 ```
 
-This checks for Python deps, installs them if needed, exports GTR-T5-base + vec2text to `models/` (~280 MB), and runs a verification pass. Pass `--force` to re-export.
+`docker compose build` pulls the models image from GCR, so authenticate first
+(`gcloud auth configure-docker`) or point the build elsewhere with
+`docker compose build --build-arg MODELS_IMAGE=<image>`.
 
-Manual export:
+To run the binary outside Docker, export into `models/` locally instead:
+
 ```bash
-pip install torch transformers sentence-transformers vec2text onnx onnxruntime
-python scripts/export_gtr_models.py --output_dir models/ --verify
-# SigLIP vision + text towers (for /image/embed and /embed model=siglip-base-patch16-224)
-python scripts/export_siglip.py --output_dir models/
+bash scripts/fetch_models.sh                            # GTR-T5-base + vec2text, with verification
+pip install torch transformers sentencepiece protobuf onnx onnxruntime
+python scripts/export_siglip.py --output_dir models/    # SigLIP towers + siglip-tokenizer.json
 ```
+
+`export_siglip.py` builds the fast tokenizer JSON straight from `spiece.model`
+(transformers has no converter for `SiglipTokenizer`) and verifies it against the
+slow tokenizer before writing it, so a mismatch fails the export instead of shipping
+wrong vectors.
 
 ## Quick start
 
@@ -72,7 +83,8 @@ python scripts/export_siglip.py --output_dir models/
 docker compose up -d
 ```
 
-Builds from source with CUDA, starts on `:8080`. No volume needed.
+Builds from source with CUDA, with models copied in from the prebuilt models image (see above).
+Listens on `:8080` inside the container; compose maps it to `:8085`. No volume needed.
 
 ## API
 
@@ -231,9 +243,19 @@ Leave `NUTS_AUTH_JWKS_URL` unset for open dev mode.
 
 - **Rust** — axum, tokio, ort (ONNX Runtime 2.0)
 - **Embedding** — GTR-T5-base (sentence-transformers), 768d, L2-normalized
+- **Multimodal** — SigLIP base patch16-224 vision and text towers, 768d, one shared space
 - **Storage** — ephemeral `RwLock<HashMap>`, no disk persistence
 - **Inversion** — vec2text gtr-base (projection + T5 encoder/decoder, optional)
 - **Auth** — nuts-auth RS256 JWT + `ahp_` API tokens
+
+## Versioning & releases
+
+`version` in `Cargo.toml` is the single source of truth; `/health` reports it. Every release
+is tagged `v<version>`. `.github/workflows/release.yml` builds the gateway image on tag push to
+`ghcr.io/deepbluedynamics/shivvr-gateway` (and to Docker Hub as `deepbluedynamics/shivvr-gateway`
+when the repo has `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets), and refuses a tag that does not
+match `Cargo.toml`. The CUDA app image is built on Cloud Build by `deploy.sh` as
+`gcr.io/gnosis-459403/shivvr:v<version>`. Full procedure: [OPERATIONS.md](OPERATIONS.md#versioning--releases).
 
 ## License
 

@@ -85,14 +85,28 @@ Full build + deploy from source (runs in Cloud Build — no local Docker or mode
 
 ```bash
 cd shivvr
-bash deploy.sh
+bash deploy.sh                    # app image + Cloud Run
+bash deploy.sh --rebuild-models   # rebuild the models image first (only when the export scripts change)
 ```
 
 What it does:
-1. `gcloud builds submit` — uploads source, builds Docker image in GCP (downloads PyTorch + HuggingFace models, compiles Rust with CUDA), pushes to `gcr.io/$PROJECT_ID/shivvr:latest`
-2. `gcloud run deploy` — deploys new revision, routes 100% traffic
+1. (`--rebuild-models` only) `gcloud builds submit --config cloudbuild-models.yaml` runs `Dockerfile.models`:
+   downloads PyTorch and the Hugging Face weights, exports GTR-T5-base, the vec2text inverter, the SigLIP
+   vision and text towers and the SigLIP tokenizer JSON, and pushes `gcr.io/$PROJECT_ID/shivvr-models:latest`.
+   About 12 minutes.
+2. `gcloud builds submit --tag gcr.io/$PROJECT_ID/shivvr:v<version>` compiles Rust with CUDA and copies
+   `/models` from the models image. Cloud Build never uploads the gitignored `models/` directory, which is
+   why the app image cannot copy from the source tree. About 17 minutes. The image is then also tagged `:latest`.
+3. `gcloud run deploy shivvr --image ...:v<version>` creates the new revision and routes 100% of traffic.
+   The version comes from `Cargo.toml` (see **Versioning & releases**).
 
-Build time: ~10–15 min first run (model download + Rust compile), ~8 min with partial cache.
+The gateway (`shivvr-landing`, the public `shivvr.nuts.services` front door) is deployed separately once its
+image exists in GCR (the release workflow publishes it to GHCR; push a copy with `docker push
+gcr.io/$PROJECT_ID/shivvr-gateway:v<version>`):
+
+```bash
+gcloud run deploy shivvr-landing --image gcr.io/$PROJECT_ID/shivvr-gateway:v<version> --region us-central1 --project "$PROJECT_ID"
+```
 
 ---
 
