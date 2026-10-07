@@ -1,5 +1,5 @@
 #[cfg(feature = "ml")]
-use shivvr::{api, audio, auth, chunker, crypto, embedder, inverter, openai, store, temp_store, vision};
+use shivvr::{api, audio, auth, chunker, crypto, embedder, embeddinggemma, inverter, openai, store, temp_store, vision};
 #[cfg(feature = "ml")]
 use std::sync::Arc;
 #[cfg(feature = "ml")]
@@ -11,6 +11,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    // Loopback unless BIND_ADDR says otherwise; the Docker images set 0.0.0.0.
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
 
     // Landing-only mode: skip all model/backend initialization entirely and
     // serve just the static homepage + a stub /health. Used for a lightweight,
@@ -19,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("LANDING_ONLY").map(|v| v == "true").unwrap_or(false) {
         println!("LANDING_ONLY=true -- serving static homepage only, no backend/model init");
         let app = api::landing_router();
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("{}:{}", bind_addr, port);
         println!("Starting shivvr (landing-only) on {}", addr);
         let listener = TcpListener::bind(&addr).await?;
         axum::serve(listener, app).await?;
@@ -172,6 +174,39 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // EmbeddingGemma 2 text path, served through `POST /embed` with
+    // model=embeddinggemma-2. Optional: absent files only disable that model.
+    let embeddinggemma2_model_path = std::env::var("EMBEDDINGGEMMA2_MODEL_PATH")
+        .unwrap_or_else(|_| "models/embeddinggemma2-text.onnx".to_string());
+    let embeddinggemma2_tokenizer_path = std::env::var("EMBEDDINGGEMMA2_TOKENIZER_PATH")
+        .unwrap_or_else(|_| "models/embeddinggemma2-tokenizer.json".to_string());
+    let embeddinggemma2_max_tokens = std::env::var("EMBEDDINGGEMMA2_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(embeddinggemma::EMBEDDINGGEMMA2_DEFAULT_MAX_TOKENS);
+    let embeddinggemma2 = match embeddinggemma::EmbeddingGemma2Embedder::new(
+        &embeddinggemma2_model_path,
+        &embeddinggemma2_tokenizer_path,
+        embeddinggemma2_max_tokens,
+    ) {
+        Ok(e) => {
+            println!(
+                "EmbeddingGemma 2 text embedder loaded from {} (tokenizer {}, max {} tokens)",
+                embeddinggemma2_model_path,
+                embeddinggemma2_tokenizer_path,
+                embeddinggemma2_max_tokens.clamp(1, embeddinggemma::EMBEDDINGGEMMA2_MAX_TOKENS)
+            );
+            Some(Arc::new(e))
+        }
+        Err(e) => {
+            println!(
+                "EmbeddingGemma 2 text embedder not available: {} — /embed model=embeddinggemma-2 disabled",
+                e
+            );
+            None
+        }
+    };
+
     let state = Arc::new(api::AppState {
         store,
         temp_store: temp_store.clone(),
@@ -183,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         audio_client,
         vision_embedder,
         siglip_text,
+        embeddinggemma2,
         start_time: std::time::Instant::now(),
         nuts_auth,
         openai_auth_required,
@@ -204,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = api::router(state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("{}:{}", bind_addr, port);
     if cfg!(feature = "cuda") {
         println!("GPU: CUDA execution provider enabled");
     } else {

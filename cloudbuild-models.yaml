@@ -9,4 +9,4 @@ steps:
       - .
 images:
   - gcr.io/gnosis-459403/shivvr-models:latest
-timeout: 2400s
+timeout: 3600s

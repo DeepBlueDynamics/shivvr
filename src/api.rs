@@ -31,6 +31,9 @@ pub struct AppState {
     /// SigLIP text tower (same space as `vision_embedder`); `None` when the
     /// ONNX or tokenizer file is missing.
     pub siglip_text: Option<Arc<crate::vision::SiglipTextEmbedder>>,
+    /// EmbeddingGemma 2 text path; `None` when the ONNX or tokenizer file is
+    /// missing.
+    pub embeddinggemma2: Option<Arc<crate::embeddinggemma::EmbeddingGemma2Embedder>>,
     pub start_time: std::time::Instant,
     pub nuts_auth: Option<Arc<NutsAuth>>,
     pub openai_auth_required: bool,
@@ -1188,6 +1191,15 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         });
     }
 
+    if state.embeddinggemma2.is_some() {
+        models.push(ModelInfo {
+            name: crate::embed_api::EMBEDDINGGEMMA2_MODEL.to_string(),
+            role: "text".to_string(),
+            dimension: crate::embed_api::EMBEDDINGGEMMA2_DIM,
+            status: "active".to_string(),
+        });
+    }
+
     let audio_available = state.audio_client.health().await;
     let vision_available = state.vision_embedder.is_some();
 
@@ -1602,6 +1614,10 @@ pub async fn homepage(State(state): State<Arc<AppState>>) -> Html<String> {
   <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
+  <tr><td class="method">POST</td><td><code>/embed</code></td><td>Batched text vectors, no store side effects. <code>model</code>: <code>gtr-t5-base</code> (default, 768d), <code>siglip-base-patch16-224</code> (SigLIP text space, comparable with <code>/image/embed</code>) or <code>embeddinggemma-2</code> (768d; optional <code>task</code> and <code>dimensions</code>, see below)</td></tr>
+  <tr><td class="method">POST</td><td><code>/image/embed</code></td><td>SigLIP image vector (768d) from <code>image_base64</code>; same space as SigLIP text</td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/transcribe</code></td><td>Transcript from <code>audio_base64</code> via the transcription service</td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/embed</code></td><td>Transcript + GTR-T5 vector from <code>audio_base64</code></td></tr>
 </table>
 </div>
 
@@ -1622,6 +1638,11 @@ curl "http://localhost:8085/sessions/my-session/search?q=Known+Opossum&amp;hybri
 
 <span class="cm"># High-speed Lexical-Only BM25 Search (Bypasses ONNX embedder)</span>
 curl "http://localhost:8085/sessions/my-session/search?q=Opossum&amp;lexical_only=true"
+
+<span class="cm"># Text vectors with EmbeddingGemma 2 (query prefix, 256d)</span>
+curl -X POST http://localhost:8085/embed \
+  -H "Content-Type: application/json" \
+  -d '{{"texts": ["Who protects the Supreme Raven?"], "model": "embeddinggemma-2", "task": "query", "dimensions": 256}}'
 
 <span class="cm"># Synchronize Claude Code or Antigravity with shivvr's Native MCP Server</span>
 nemesis8 mcp add http://localhost:8085/mcp/sse
@@ -1646,6 +1667,19 @@ nemesis8 mcp add http://localhost:8085/mcp/sse
 </table>
 </div>
 
+<!-- Embed request -->
+<h2>Embed request (<code>POST /embed</code>)</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>texts</code></td><td>required</td><td>1–256 strings, 32 KiB each</td></tr>
+  <tr><td><code>model</code></td><td>gtr-t5-base</td><td><code>gtr-t5-base</code>, <code>siglip-base-patch16-224</code> or <code>embeddinggemma-2</code>; 503 if that model is not loaded</td></tr>
+  <tr><td><code>task</code></td><td>none</td><td><code>embeddinggemma-2</code> only: prompt prefix by name, e.g. <code>query</code>, <code>document</code>, <code>Clustering</code>, <code>Classification</code>, <code>STS</code>, <code>CodeRetrieval</code>, <code>QuestionAnswering</code>, <code>FactChecking</code> (case-insensitive)</td></tr>
+  <tr><td><code>dimensions</code></td><td>768</td><td><code>embeddinggemma-2</code> only: 128, 256, 512 or 768 (Matryoshka truncation, re-normalized)</td></tr>
+</table>
+</div>
+<p class="hint">Response: <code>{{"model", "dim", "vectors"}}</code>, unit-length vectors. Use <code>task=query</code> for search queries and <code>task=document</code> for the passages they search.</p>
+
 <!-- Environment -->
 <h2>Environment</h2>
 <div class="tbl-wrap">
@@ -1654,6 +1688,11 @@ nemesis8 mcp add http://localhost:8085/mcp/sse
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
   <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
   <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
+  <tr><td><code>VISION_MODEL_PATH</code></td><td>models/siglip-vision.onnx</td><td>SigLIP vision tower (<code>/image/embed</code>) — optional</td></tr>
+  <tr><td><code>SIGLIP_TEXT_MODEL_PATH</code></td><td>models/siglip-text.onnx</td><td>SigLIP text tower (<code>/embed</code> <code>model=siglip-base-patch16-224</code>) — optional</td></tr>
+  <tr><td><code>SIGLIP_TOKENIZER_PATH</code></td><td>models/siglip-tokenizer.json</td><td>SigLIP tokenizer</td></tr>
+  <tr><td><code>EMBEDDINGGEMMA2_MODEL_PATH</code></td><td>models/embeddinggemma2-text.onnx</td><td>EmbeddingGemma 2 text path (<code>/embed</code> <code>model=embeddinggemma-2</code>) — optional</td></tr>
+  <tr><td><code>EMBEDDINGGEMMA2_TOKENIZER_PATH</code></td><td>models/embeddinggemma2-tokenizer.json</td><td>EmbeddingGemma 2 tokenizer</td></tr>
   <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables OpenAI completions and retrieve embeddings</td></tr>
   <tr><td><code>ANTHROPIC_API_KEY</code></td><td>—</td><td>Enables Anthropic completions and GhostAgent loops</td></tr>
   <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Enable auth (open dev mode if unset)</td></tr>
@@ -1671,6 +1710,7 @@ nemesis8 mcp add http://localhost:8085/mcp/sse
   <tr><td>MCP Server</td><td>HTTP/SSE JSON-RPC 2.0 Model Context Protocol transport layer</td></tr>
   <tr><td>Hybrid Index</td><td>Tantivy FST deterministic phrase engine + BM25F field indexer</td></tr>
   <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
+  <tr><td>Text embedding (<code>/embed</code>)</td><td>GTR-T5-base (default), SigLIP text tower, EmbeddingGemma 2 text path (768d, Matryoshka to 512/256/128) — the last two optional</td></tr>
   <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
   <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
   <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>
@@ -1998,6 +2038,10 @@ const LANDING_HTML: &str = r##"<!DOCTYPE html>
   <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
+  <tr><td class="method">POST</td><td><code>/embed</code></td><td>Batched text vectors, no store side effects. <code>model</code>: <code>gtr-t5-base</code> (default, 768d), <code>siglip-base-patch16-224</code> (SigLIP text space, comparable with <code>/image/embed</code>) or <code>embeddinggemma-2</code> (768d; optional <code>task</code> and <code>dimensions</code>, see below)</td></tr>
+  <tr><td class="method">POST</td><td><code>/image/embed</code></td><td>SigLIP image vector (768d) from <code>image_base64</code>; same space as SigLIP text</td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/transcribe</code></td><td>Transcript from <code>audio_base64</code> via the transcription service</td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/embed</code></td><td>Transcript + GTR-T5 vector from <code>audio_base64</code></td></tr>
 </table>
 </div>
 
@@ -2018,6 +2062,11 @@ curl "https://shivvr.nuts.services/sessions/my-session/search?q=Known+Opossum&am
 
 <span class="cm"># High-speed Lexical-Only BM25 Search (Bypasses ONNX embedder)</span>
 curl "https://shivvr.nuts.services/sessions/my-session/search?q=Opossum&amp;lexical_only=true"
+
+<span class="cm"># Text vectors with EmbeddingGemma 2 (query prefix, 256d)</span>
+curl -X POST https://shivvr.nuts.services/embed \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["Who protects the Supreme Raven?"], "model": "embeddinggemma-2", "task": "query", "dimensions": 256}'
 
 <span class="cm"># Synchronize Claude Code or Antigravity with shivvr's Native MCP Server</span>
 nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
@@ -2042,6 +2091,19 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 </table>
 </div>
 
+<!-- Embed request -->
+<h2>Embed request (<code>POST /embed</code>)</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>texts</code></td><td>required</td><td>1–256 strings, 32 KiB each</td></tr>
+  <tr><td><code>model</code></td><td>gtr-t5-base</td><td><code>gtr-t5-base</code>, <code>siglip-base-patch16-224</code> or <code>embeddinggemma-2</code>; 503 if that model is not loaded</td></tr>
+  <tr><td><code>task</code></td><td>none</td><td><code>embeddinggemma-2</code> only: prompt prefix by name, e.g. <code>query</code>, <code>document</code>, <code>Clustering</code>, <code>Classification</code>, <code>STS</code>, <code>CodeRetrieval</code>, <code>QuestionAnswering</code>, <code>FactChecking</code> (case-insensitive)</td></tr>
+  <tr><td><code>dimensions</code></td><td>768</td><td><code>embeddinggemma-2</code> only: 128, 256, 512 or 768 (Matryoshka truncation, re-normalized)</td></tr>
+</table>
+</div>
+<p class="hint">Response: <code>{"model", "dim", "vectors"}</code>, unit-length vectors. Use <code>task=query</code> for search queries and <code>task=document</code> for the passages they search.</p>
+
 <!-- Environment -->
 <h2>Environment</h2>
 <div class="tbl-wrap">
@@ -2050,6 +2112,11 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
   <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
   <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
+  <tr><td><code>VISION_MODEL_PATH</code></td><td>models/siglip-vision.onnx</td><td>SigLIP vision tower (<code>/image/embed</code>) — optional</td></tr>
+  <tr><td><code>SIGLIP_TEXT_MODEL_PATH</code></td><td>models/siglip-text.onnx</td><td>SigLIP text tower (<code>/embed</code> <code>model=siglip-base-patch16-224</code>) — optional</td></tr>
+  <tr><td><code>SIGLIP_TOKENIZER_PATH</code></td><td>models/siglip-tokenizer.json</td><td>SigLIP tokenizer</td></tr>
+  <tr><td><code>EMBEDDINGGEMMA2_MODEL_PATH</code></td><td>models/embeddinggemma2-text.onnx</td><td>EmbeddingGemma 2 text path (<code>/embed</code> <code>model=embeddinggemma-2</code>) — optional</td></tr>
+  <tr><td><code>EMBEDDINGGEMMA2_TOKENIZER_PATH</code></td><td>models/embeddinggemma2-tokenizer.json</td><td>EmbeddingGemma 2 tokenizer</td></tr>
   <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables OpenAI completions and retrieve embeddings</td></tr>
   <tr><td><code>ANTHROPIC_API_KEY</code></td><td>—</td><td>Enables Anthropic completions and GhostAgent loops</td></tr>
   <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Enable auth (open dev mode if unset)</td></tr>
@@ -2067,6 +2134,7 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td>MCP Server</td><td>HTTP/SSE JSON-RPC 2.0 Model Context Protocol transport layer</td></tr>
   <tr><td>Hybrid Index</td><td>Tantivy FST deterministic phrase engine + BM25F field indexer</td></tr>
   <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
+  <tr><td>Text embedding (<code>/embed</code>)</td><td>GTR-T5-base (default), SigLIP text tower, EmbeddingGemma 2 text path (768d, Matryoshka to 512/256/128) — the last two optional</td></tr>
   <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
   <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
   <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>
@@ -2162,7 +2230,7 @@ fn is_free_operation(path: &str, method: &Method, query: Option<&str>, state: &A
         (&Method::POST, "/audio/transcribe") => true,
         (&Method::POST, "/audio/embed") => true,
         (&Method::POST, "/image/embed") => true,
-        // Local GTR-T5 compute only, like /image/embed and organize-role ingest.
+        // Local model compute only (GTR-T5, SigLIP text, EmbeddingGemma 2), like /image/embed and organize-role ingest.
         (&Method::POST, "/embed") => true,
         _ => false,
     }
@@ -2338,12 +2406,16 @@ pub async fn image_embed_handler(
 /// - `siglip-base-patch16-224`: the SigLIP text tower, same space as
 ///   `POST /image/embed`, for text-to-image comparison. 503 when the tower or
 ///   its tokenizer is not loaded.
+/// - `embeddinggemma-2`: EmbeddingGemma 2's text path. `task` prepends the
+///   matching prompt prefix and `dimensions` truncates (Matryoshka) and
+///   re-normalizes. 503 when the model or its tokenizer is not loaded.
 pub async fn embed_texts(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::embed_api::EmbedRequest>,
 ) -> Result<Json<crate::embed_api::EmbedResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use crate::embed_api::{validate, EmbedModel, EmbedResponse};
-    let model = validate(&req).map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    use crate::embed_api::{truncate_normalize, validate, EmbedModel, EmbedResponse};
+    let plan = validate(&req).map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    let model = plan.model;
     let texts = req.texts;
     let expected_dim = model.dim();
 
@@ -2375,6 +2447,24 @@ pub async fn embed_texts(
             })
             .await
         }
+        EmbedModel::EmbeddingGemma2 => {
+            let gemma = state.embeddinggemma2.clone().ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: "EmbeddingGemma 2 not loaded (models/embeddinggemma2-text.onnx or models/embeddinggemma2-tokenizer.json not available)".to_string(),
+                    }),
+                )
+            })?;
+            let prefix = plan.prefix;
+            tokio::task::spawn_blocking(move || {
+                texts
+                    .iter()
+                    .map(|t| gemma.embed_text(prefix, t))
+                    .collect::<anyhow::Result<Vec<Vec<f32>>>>()
+            })
+            .await
+        }
     };
 
     let vectors = joined
@@ -2400,9 +2490,15 @@ pub async fn embed_texts(
         ));
     }
 
+    let vectors: Vec<Vec<f32>> = if plan.dim < expected_dim {
+        vectors.into_iter().map(|v| truncate_normalize(v, plan.dim)).collect()
+    } else {
+        vectors
+    };
+
     Ok(Json(EmbedResponse {
         model: model.name().to_string(),
-        dim: expected_dim,
+        dim: plan.dim,
         vectors,
     }))
 }

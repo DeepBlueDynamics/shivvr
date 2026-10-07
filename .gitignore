@@ -30,3 +30,6 @@ training/**/__pycache__/
 
 # local agent tool config
 .nemesis8.toml
+
+# written by the service on first start (default guardrail list)
+guardrails/

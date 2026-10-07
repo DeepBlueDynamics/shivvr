@@ -1,10 +1,34 @@
 # Standalone model-exporter image.
-# Build this separately when export_gtr_models.py or deps change.
+# Build this separately when the export scripts or deps change.
 # Tag: gcr.io/gnosis-459403/shivvr-models:latest
 #
 #   gcloud builds submit --tag gcr.io/gnosis-459403/shivvr-models:latest \
 #     --config cloudbuild-models.yaml --project gnosis-459403 .
 
+# Stage 1: EmbeddingGemma 2 text path. Needs transformers >= 5.18 and
+# sentence-transformers >= 6.1, which conflict with the vec2text pins below, so
+# it exports in its own environment and only the ONNX + tokenizer JSON carry over.
+FROM python:3.12-slim AS embeddinggemma2
+
+ARG TORCH_SPEC="torch>=2.9"
+ARG TRANSFORMERS_SPEC="transformers>=5.18"
+RUN pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    "${TORCH_SPEC}" \
+    "torchvision" \
+    "${TRANSFORMERS_SPEC}" \
+    "sentence-transformers>=6.1.0" \
+    "pillow>=12.0" \
+    "onnx>=1.18" \
+    "onnxscript" \
+    "onnxruntime>=1.22"
+
+COPY scripts/export_embeddinggemma2.py /export_embeddinggemma2.py
+# Text backbone only (~1.5 GB download); fails the build if the ONNX output
+# drifts from SentenceTransformer.encode().
+RUN python /export_embeddinggemma2.py --output_dir /models
+
+# Stage 2: GTR-T5-base, vec2text inverter, SigLIP.
 FROM python:3.11-slim
 
 RUN pip install --no-cache-dir \
@@ -24,5 +48,7 @@ COPY scripts/export_siglip.py /export_siglip.py
 RUN python /export_gtr_models.py --output_dir /models
 # SigLIP vision + text towers and the fast tokenizer JSON (~1.6 GB download).
 RUN python /export_siglip.py --output_dir /models
+
+COPY --from=embeddinggemma2 /models/embeddinggemma2-text.onnx /models/embeddinggemma2-tokenizer.json /models/
 
 CMD ["echo", "models ready"]

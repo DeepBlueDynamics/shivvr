@@ -14,6 +14,8 @@ pub mod limits;
 #[cfg(feature = "ml")]
 pub mod embedder;
 #[cfg(feature = "ml")]
+pub mod embeddinggemma;
+#[cfg(feature = "ml")]
 pub mod inverter;
 pub mod openai;
 pub mod similarity;

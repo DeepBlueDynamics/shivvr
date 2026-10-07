@@ -17,15 +17,15 @@ WORKDIR /app
 
 # Vendor sub-crate (lume-hybrid) comes in with the rest of the source tree —
 # Cargo's `path = "vendor/lume-hybrid"` resolves inside /app/vendor/.
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY vendor ./vendor
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release --features cuda || true
+RUN cargo build --release --locked --features cuda || true
 RUN rm -rf src
 
 COPY src ./src
 RUN touch src/main.rs
-RUN cargo build --release --features cuda
+RUN cargo build --release --locked --features cuda
 
 
 RUN mkdir -p /ort-libs && \
@@ -44,11 +44,14 @@ COPY --from=models /models /models
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
 ENV PORT=8080
+ENV BIND_ADDR=0.0.0.0
 ENV MODEL_PATH=/models/gtr-t5-base.onnx
 ENV TOKENIZER_PATH=/models/tokenizer.json
 ENV VISION_MODEL_PATH=/models/siglip-vision.onnx
 ENV SIGLIP_TEXT_MODEL_PATH=/models/siglip-text.onnx
 ENV SIGLIP_TOKENIZER_PATH=/models/siglip-tokenizer.json
+ENV EMBEDDINGGEMMA2_MODEL_PATH=/models/embeddinggemma2-text.onnx
+ENV EMBEDDINGGEMMA2_TOKENIZER_PATH=/models/embeddinggemma2-tokenizer.json
 ENV TRANSCRIPTION_URL=http://hyperia-transcription:8765
 ENV INVERTER_PROJECTION_PATH=/models/inverter/projection.onnx
 ENV INVERTER_ENCODER_PATH=/models/inverter/encoder.onnx

@@ -20,7 +20,7 @@ if [[ "$1" == "--rebuild-models" ]]; then
   gcloud builds submit \
     --config cloudbuild-models.yaml \
     --project "${PROJECT_ID}" \
-    --timeout 40m \
+    --timeout 60m \
     .
   echo "==> Models image updated: ${MODELS_IMAGE}:latest"
 fi

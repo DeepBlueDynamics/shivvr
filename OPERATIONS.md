@@ -61,7 +61,7 @@ gcloud run services describe shivvr --region us-central1 \
 - **Single source of truth:** `version` in `Cargo.toml`. `/health` and the homepage report it via `CARGO_PKG_VERSION`.
 - **Tag every release** with `v<version>` on the commit you shipped (`git tag -a v0.3.0`). The GitHub Actions workflow refuses a tag that does not match `Cargo.toml`.
 - **Images per release:**
-  - `gcr.io/$PROJECT_ID/shivvr:v<version>` (+ `:latest`) — the CUDA app image, built by `deploy.sh` on Cloud Build. It stays on Cloud Build because it copies the gitignored `models/` directory (~2.2 GB of ONNX files) into the image.
+  - `gcr.io/$PROJECT_ID/shivvr:v<version>` (+ `:latest`) — the CUDA app image, built by `deploy.sh` on Cloud Build. It copies `/models` from the prebuilt `shivvr-models` image: about 2.2 GB of ONNX files before EmbeddingGemma 2, whose float32 text model is expected to add roughly 1.1 GB (not measured yet).
   - `ghcr.io/deepbluedynamics/shivvr-gateway:<version>` (+ `:v<version>`, `:latest`) — the GPU-less gateway, built by `.github/workflows/release.yml` on every `v*` tag push. Also pushed to Docker Hub as `deepbluedynamics/shivvr-gateway` when the repo has `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets.
 
 Cutting a release:
@@ -92,8 +92,23 @@ bash deploy.sh --rebuild-models   # rebuild the models image first (only when th
 What it does:
 1. (`--rebuild-models` only) `gcloud builds submit --config cloudbuild-models.yaml` runs `Dockerfile.models`:
    downloads PyTorch and the Hugging Face weights, exports GTR-T5-base, the vec2text inverter, the SigLIP
-   vision and text towers and the SigLIP tokenizer JSON, and pushes `gcr.io/$PROJECT_ID/shivvr-models:latest`.
-   About 12 minutes.
+   vision and text towers and the SigLIP tokenizer JSON, then (in a separate stage with a newer
+   transformers) the EmbeddingGemma 2 text model and tokenizer, and pushes
+   `gcr.io/$PROJECT_ID/shivvr-models:latest`. About 12 minutes before EmbeddingGemma 2 was added;
+   expect longer, and re-time it on the first run. The EmbeddingGemma 2 stage fails the build if its
+   tokenizer or ONNX output drifts from `SentenceTransformer.encode()` (cosine below 0.9999).
+   `cloudbuild-models.yaml` sets a 3600s timeout; `deploy.sh` also passes `--timeout 40m`.
+
+   What the models image holds under `/models`:
+
+   | File | Model | Served by |
+   |------|-------|-----------|
+   | `gtr-t5-base.onnx`, `tokenizer.json` | GTR-T5-base (768d) | ingest, search, `POST /embed` (default model) |
+   | `inverter/*.onnx` | vec2text gtr-base | `POST /invert` |
+   | `siglip-vision.onnx` | SigLIP base patch16-224, vision tower | `POST /image/embed` |
+   | `siglip-text.onnx`, `siglip-tokenizer.json` | SigLIP text tower | `POST /embed` with `model=siglip-base-patch16-224` |
+   | `embeddinggemma2-text.onnx`, `embeddinggemma2-tokenizer.json` | EmbeddingGemma 2, text path only (768d, float32, ~1.1 GB expected) | `POST /embed` with `model=embeddinggemma-2` |
+
 2. `gcloud builds submit --tag gcr.io/$PROJECT_ID/shivvr:v<version>` compiles Rust with CUDA and copies
    `/models` from the models image. Cloud Build never uploads the gitignored `models/` directory, which is
    why the app image cannot copy from the source tree. About 17 minutes. The image is then also tagged `:latest`.
@@ -139,6 +154,10 @@ gcloud run deploy shivvr \
 # Health endpoint
 curl https://shivvr.nuts.services/health
 
+# Text embedding smoke test (EmbeddingGemma 2 takes optional task + dimensions)
+curl -s -X POST https://shivvr.nuts.services/embed -H "Content-Type: application/json" \
+  -d '{"texts": ["hello"], "model": "embeddinggemma-2", "task": "query", "dimensions": 256}' | head -c 200
+
 # Cloud Run revision list
 gcloud run revisions list --service shivvr --region us-central1 --project "$PROJECT_ID"
 
@@ -149,6 +168,37 @@ gcloud run services describe shivvr --region us-central1 --project "$PROJECT_ID"
 gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=shivvr" \
   --project "$PROJECT_ID" --limit 100 --format "value(textPayload)"
 ```
+
+`/health` lists each loaded model under `models` (`name`, `role`, `dimension`, `status`). With every
+model file present:
+
+| `name` | `role` | `dimension` |
+|--------|--------|-------------|
+| `gtr-t5-base` | `organize` | 768 |
+| `text-embedding-ada-002` | `retrieve` | 1536 (only with `OPENAI_API_KEY`) |
+| `siglip-base-patch16-224` | `multimodal` | 768 (vision tower) |
+| `siglip-base-patch16-224` | `multimodal-text` | 768 (text tower) |
+| `embeddinggemma-2` | `text` | 768 (`/embed` can truncate to 512/256/128) |
+
+An optional model that failed to load is absent from the list; its startup log line says why.
+
+### Troubleshooting
+
+**`EmbeddingGemma 2 text embedder not available: ... — /embed model=embeddinggemma-2 disabled`** in the
+startup log, and `/embed` with `model=embeddinggemma-2` answers 503 (`EmbeddingGemma 2 not loaded ...`).
+The ONNX file or the tokenizer JSON was missing or failed to load. The rest of the service is unaffected.
+- Check the paths: `EMBEDDINGGEMMA2_MODEL_PATH` (`/models/embeddinggemma2-text.onnx` in the image,
+  default `models/embeddinggemma2-text.onnx` when unset) and `EMBEDDINGGEMMA2_TOKENIZER_PATH`
+  (`/models/embeddinggemma2-tokenizer.json`).
+- Files missing from the image means the `shivvr-models` image predates EmbeddingGemma 2: run
+  `bash deploy.sh --rebuild-models`. Locally, run `python scripts/export_embeddinggemma2.py --output_dir models/`
+  in its own venv with `transformers>=5.18` and `sentence-transformers>=6.1` (they conflict with the
+  vec2text pins; see `plan/EMBEDDINGGEMMA2_PLAN.md`, WP1).
+- A tokenizer load error usually means the JSON was not written by the export script.
+- Never export or run it in float16: the model returns NaN or silently degraded vectors. The export is float32.
+
+`/embed` answers 400 for an unknown `task`, for `dimensions` other than 128/256/512/768, and for a
+`task` or a non-native `dimensions` on `gtr-t5-base` or `siglip-base-patch16-224`.
 
 ---
 
@@ -193,11 +243,14 @@ Set at deploy time via `--set-env-vars` or the Cloud Run console. Current requir
 | Variable | Value | Notes |
 |----------|-------|-------|
 | `PORT` | `8080` | Set by Cloud Run automatically |
+| `BIND_ADDR` | `0.0.0.0` | Baked into the image; the binary defaults to `127.0.0.1` outside Docker |
 | `MODEL_PATH` | `/models/gtr-t5-base.onnx` | Baked into image |
 | `TOKENIZER_PATH` | `/models/tokenizer.json` | Baked into image |
 | `VISION_MODEL_PATH` | `/models/siglip-vision.onnx` | Baked into image |
 | `SIGLIP_TEXT_MODEL_PATH` | `/models/siglip-text.onnx` | Baked into image |
 | `SIGLIP_TOKENIZER_PATH` | `/models/siglip-tokenizer.json` | Baked into image; written by `scripts/export_siglip.py` |
+| `EMBEDDINGGEMMA2_MODEL_PATH` | `/models/embeddinggemma2-text.onnx` | Baked into image; written by `scripts/export_embeddinggemma2.py` |
+| `EMBEDDINGGEMMA2_TOKENIZER_PATH` | `/models/embeddinggemma2-tokenizer.json` | Baked into image; written by `scripts/export_embeddinggemma2.py` |
 | `LD_LIBRARY_PATH` | `/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime` | Set in Dockerfile |
 
 Optional vars (set in Cloud Run console or via `--set-env-vars`):
@@ -226,8 +279,8 @@ gcloud run services update shivvr \
 - **No persistence**: all embeddings live in process memory. Restart = clean slate.
 - **GPU inference is serialized**: concurrency is capped at 4. Raising it risks OOM on the L4.
 - **Scale to zero**: cold start takes ~30–60s (ONNX model load). Expected for this use case.
-- **Models baked into image**: GTR-T5-base ONNX exported during `docker build` via `scripts/export_gtr_models.py`. No runtime download needed.
-- **Inverter disabled**: vec2text inverter models not included in current build. `/invert` returns 503.
+- **Models baked into image**: `Dockerfile.models` exports GTR-T5-base (`scripts/export_gtr_models.py`), SigLIP (`scripts/export_siglip.py`) and the EmbeddingGemma 2 text path (`scripts/export_embeddinggemma2.py`) into the `shivvr-models` image, and the app image copies `/models` from it. No runtime download needed. SigLIP and EmbeddingGemma 2 are optional at startup: missing files disable only those models.
+- **Inverter**: `export_gtr_models.py` exports the vec2text inverter into the models image and the Dockerfile sets the `INVERTER_*` paths, so `/invert` should be live. Confirm with `inversion_available` in `/health`; it returns 503 only when those files are missing.
 - **Auth**: `NUTS_AUTH_JWKS_URL` not set in current deployment → open dev mode (no token required).
 
 ---
@@ -249,4 +302,4 @@ gcloud builds log BUILD_ID --project "$PROJECT_ID"
 
 - Cloud Run GPU (L4): ~$0.85/hr when running, $0 when scaled to zero
 - Cloud Build: ~$0.003/build-minute (free tier: 120 min/day)
-- GCR storage: ~$0.02/GB/month for the image (~3 GB)
+- GCR storage: ~$0.02/GB/month for the image (~3 GB before EmbeddingGemma 2, ~4 GB expected with it)

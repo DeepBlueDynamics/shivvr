@@ -43,7 +43,9 @@ async fn main() -> anyhow::Result<()> {
     });
     let app = router(state);
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    // Loopback unless BIND_ADDR says otherwise; Dockerfile.gateway sets 0.0.0.0.
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let listener = tokio::net::TcpListener::bind(format!("{bind_addr}:{port}")).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }

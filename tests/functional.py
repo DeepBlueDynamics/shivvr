@@ -71,6 +71,7 @@ check("gpu active", health.get("gpu") is True, f"gpu={health.get('gpu')}")
 check("encryption available", health.get("encryption_available") is True)
 inversion_up = health.get("inversion_available") is True
 check("inversion available", inversion_up, f"inversion_available={health.get('inversion_available')}")
+embeddinggemma2_up = any(m.get("name") == "embeddinggemma-2" for m in health.get("models", []))
 
 # ── 2. Session lifecycle ──────────────────────────────────────────────────────
 section("Session lifecycle")
@@ -166,7 +167,106 @@ if status1 == 200 and status2 == 200:
     sim = cosine(e1, e2)
     check("same text -> same embedding (cosine >= 0.9999)", sim >= 0.9999, f"cosine={sim:.6f}")
 
-# ── 7. Cleanup ───────────────────────────────────────────────────────────────
+# ── 7. EmbeddingGemma 2 (/embed) ──────────────────────────────────────────────
+section("EmbeddingGemma 2 (/embed)")
+
+# Request validation: 400s for invalid task, invalid dimensions, and task on gtr-t5-base
+status, r = req("POST", "/embed", {
+    "model": "embeddinggemma-2",
+    "texts": ["test"],
+    "task": "invalid_task_name"
+})
+check("bad task returns 400", status == 400, f"status={status}")
+
+status, r = req("POST", "/embed", {
+    "model": "embeddinggemma-2",
+    "texts": ["test"],
+    "dimensions": 999
+})
+check("bad dimensions (999) returns 400", status == 400, f"status={status}")
+
+status, r = req("POST", "/embed", {
+    "model": "gtr-t5-base",
+    "texts": ["test"],
+    "task": "query"
+})
+check("task on gtr-t5-base returns 400", status == 400, f"status={status}")
+
+if not embeddinggemma2_up:
+    print(f"  [{SKIP}] embeddinggemma-2 not listed in /health — skipping model inference tests")
+else:
+    sample_text = "The harbor at dawn glows amber beneath a copper sky."
+
+    # Default 768 dims and unit norm
+    status, resp = req("POST", "/embed", {
+        "model": "embeddinggemma-2",
+        "texts": [sample_text]
+    })
+    ok = check("default returns 200", status == 200, f"status={status}")
+    if ok:
+        v = resp["vectors"][0]
+        check("default is 768d", len(v) == 768, f"got {len(v)}d")
+        v_norm = math.sqrt(sum(x * x for x in v))
+        check("default has unit norm", math.isclose(v_norm, 1.0, abs_tol=1e-3), f"norm={v_norm:.4f}")
+
+    # dimensions=128/256/512 return that length with unit norm
+    for d in [128, 256, 512]:
+        status, resp = req("POST", "/embed", {
+            "model": "embeddinggemma-2",
+            "texts": [sample_text],
+            "dimensions": d
+        })
+        ok = check(f"dimensions={d} returns 200", status == 200, f"status={status}")
+        if ok:
+            v = resp["vectors"][0]
+            check(f"dimensions={d} returns {d}d", len(v) == d, f"got {len(v)}d")
+            v_norm = math.sqrt(sum(x * x for x in v))
+            check(f"dimensions={d} has unit norm", math.isclose(v_norm, 1.0, abs_tol=1e-3), f"norm={v_norm:.4f}")
+
+    # task=query vs task=document give different vectors
+    status_q, resp_q = req("POST", "/embed", {
+        "model": "embeddinggemma-2",
+        "texts": [sample_text],
+        "task": "query"
+    })
+    status_d, resp_d = req("POST", "/embed", {
+        "model": "embeddinggemma-2",
+        "texts": [sample_text],
+        "task": "document"
+    })
+    ok_qd = check("task=query and task=document return 200", status_q == 200 and status_d == 200)
+    if ok_qd:
+        vq = resp_q["vectors"][0]
+        vd = resp_d["vectors"][0]
+        sim_qd = cosine(vq, vd)
+        check("task=query vs task=document give different vectors", sim_qd < 0.999, f"cosine={sim_qd:.4f}")
+
+    # Ranking sanity check: query ranks its matching passage above unrelated ones
+    query_text = "harbor at dawn"
+    match_passage = "The harbor at dawn glows amber beneath a copper sky."
+    unrelated_passage = "Machine learning models compress semantic meaning into dense vectors."
+    status_q, resp_q = req("POST", "/embed", {
+        "model": "embeddinggemma-2",
+        "texts": [query_text],
+        "task": "query"
+    })
+    status_doc, resp_doc = req("POST", "/embed", {
+        "model": "embeddinggemma-2",
+        "texts": [match_passage, unrelated_passage],
+        "task": "document"
+    })
+    ok_rank = check("ranking embed requests return 200", status_q == 200 and status_doc == 200)
+    if ok_rank:
+        vq = resp_q["vectors"][0]
+        v_match = resp_doc["vectors"][0]
+        v_unrel = resp_doc["vectors"][1]
+        sim_match = cosine(vq, v_match)
+        sim_unrel = cosine(vq, v_unrel)
+        check("query ranks matching passage above unrelated",
+              sim_match > sim_unrel,
+              f"match={sim_match:.4f} > unrelated={sim_unrel:.4f}")
+
+# ── 8. Cleanup ───────────────────────────────────────────────────────────────
 section("Cleanup")
 status, resp = req("DELETE", f"/sessions/{SESSION}")
 check("delete returns 200", status == 200)

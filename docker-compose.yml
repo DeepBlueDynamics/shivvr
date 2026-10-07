@@ -10,6 +10,8 @@ services:
       - VISION_MODEL_PATH=/models/siglip-vision.onnx
       - SIGLIP_TEXT_MODEL_PATH=/models/siglip-text.onnx
       - SIGLIP_TOKENIZER_PATH=/models/siglip-tokenizer.json
+      - EMBEDDINGGEMMA2_MODEL_PATH=/models/embeddinggemma2-text.onnx
+      - EMBEDDINGGEMMA2_TOKENIZER_PATH=/models/embeddinggemma2-tokenizer.json
       - TRANSCRIPTION_URL=http://hyperia-transcription:8765
       - LD_LIBRARY_PATH=/usr/lib/onnxruntime
       - OPENAI_API_KEY

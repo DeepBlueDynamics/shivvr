@@ -6,19 +6,26 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         let out_dir = std::env::var("OUT_DIR").unwrap();
-        let stubs = ["DXCORE", "DirectML", "D3D12"];
+        let stubs: &[(&str, &[&str])] = &[
+            ("DXCORE", &[]),
+            ("DirectML", &["DMLCreateDevice1"]),
+            ("D3D12", &["D3D12CreateDevice", "D3D12SerializeVersionedRootSignature"]),
+        ];
 
         // Find lib.exe from Visual Studio
         let lib_exe = find_lib_exe();
 
-        for name in &stubs {
+        for (name, symbols) in stubs {
             let lib_path = format!("{}\\{}.lib", out_dir, name);
-            
 
             if let Some(ref lib_exe) = lib_exe {
-                // Use lib.exe to create a proper empty import library
+                // Use lib.exe to create a proper stub import library
                 let def_path = format!("{}\\{}.def", out_dir, name);
-                std::fs::write(&def_path, format!("LIBRARY {}\nEXPORTS\n", name)).ok();
+                let mut def = format!("LIBRARY {}\nEXPORTS\n", name);
+                for sym in *symbols {
+                    def.push_str(&format!("    {}\n", sym));
+                }
+                std::fs::write(&def_path, &def).ok();
                 let status = std::process::Command::new(lib_exe)
                     .args(&[
                         "/NOLOGO",
