@@ -64,8 +64,8 @@ fn router(state: Arc<GatewayState>) -> Router {
         .with_state(state)
 }
 
-async fn home() -> Html<&'static str> {
-    Html(include_str!("../landing.html"))
+async fn home() -> Html<String> {
+    Html(include_str!("../landing.html").replace("{{VERSION}}", env!("CARGO_PKG_VERSION")))
 }
 
 async fn health() -> Json<serde_json::Value> {

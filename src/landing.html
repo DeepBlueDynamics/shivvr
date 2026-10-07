@@ -138,10 +138,10 @@
 
 <!-- Hero -->
 <div class="hero">
-  <h1>shivvr 🔪 <span class="ver">v0.3.0</span></h1>
+  <h1>shivvr 🔪 <span class="ver">v{{VERSION}}</span></h1>
   <p class="sub">Ephemeral semantic embedding & cognitive agent service.</p>
   <p class="desc">
-    Chunk text. Embed with GTR-T5-base. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
+    Chunk text. Embed with GTR-T5-base, SigLIP or EmbeddingGemma 2. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
   </p>
   <div class="ctas">
     <a class="cta" href="#api">View API</a>
@@ -285,6 +285,7 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 <table>
   <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
   <tr><td><code>PORT</code></td><td>8080</td><td>Listen port</td></tr>
+  <tr><td><code>BIND_ADDR</code></td><td>127.0.0.1</td><td>Listen address; the Docker images set <code>0.0.0.0</code></td></tr>
   <tr><td><code>MODEL_PATH</code></td><td>models/gtr-t5-base.onnx</td><td>GTR-T5-base ONNX embedder</td></tr>
   <tr><td><code>TOKENIZER_PATH</code></td><td>models/tokenizer.json</td><td>Tokenizer</td></tr>
   <tr><td><code>VISION_MODEL_PATH</code></td><td>models/siglip-vision.onnx</td><td>SigLIP vision tower (<code>/image/embed</code>) — optional</td></tr>
@@ -292,6 +293,7 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td><code>SIGLIP_TOKENIZER_PATH</code></td><td>models/siglip-tokenizer.json</td><td>SigLIP tokenizer</td></tr>
   <tr><td><code>EMBEDDINGGEMMA2_MODEL_PATH</code></td><td>models/embeddinggemma2-text.onnx</td><td>EmbeddingGemma 2 text path (<code>/embed</code> <code>model=embeddinggemma-2</code>) — optional</td></tr>
   <tr><td><code>EMBEDDINGGEMMA2_TOKENIZER_PATH</code></td><td>models/embeddinggemma2-tokenizer.json</td><td>EmbeddingGemma 2 tokenizer</td></tr>
+  <tr><td><code>EMBEDDINGGEMMA2_MAX_TOKENS</code></td><td>2048</td><td>EmbeddingGemma 2 input token cap (up to 8192; cost grows faster than linearly with length)</td></tr>
   <tr><td><code>OPENAI_API_KEY</code></td><td>—</td><td>Enables OpenAI completions and retrieve embeddings</td></tr>
   <tr><td><code>ANTHROPIC_API_KEY</code></td><td>—</td><td>Enables Anthropic completions and GhostAgent loops</td></tr>
   <tr><td><code>NUTS_AUTH_JWKS_URL</code></td><td>—</td><td>Gateway requires auth</td></tr>
@@ -300,6 +302,16 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 </div>
 
 <!-- Stack -->
+<h2>Images</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Image</th><th>Contents</th></tr>
+  <tr><td><code>deepbluedynamics/shivvr</code></td><td>The service: CUDA build with GTR-T5-base, the vec2text inverter, SigLIP and EmbeddingGemma 2 baked in (linux/amd64, NVIDIA GPU or CPU)</td></tr>
+  <tr><td><code>deepbluedynamics/shivvr-gateway</code></td><td>The GPU-less front door: auth, this page, and a proxy to the backend (linux/amd64)</td></tr>
+</table>
+</div>
+<p class="hint">Tags: <code>latest</code>, <code>X.Y.Z</code> and <code>vX.Y.Z</code> on Docker Hub. Run with <code>docker run --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr</code>.</p>
+
 <h2>Stack</h2>
 <div class="tbl-wrap">
 <table>
