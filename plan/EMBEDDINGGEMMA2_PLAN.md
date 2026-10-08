@@ -266,6 +266,20 @@ near 85 °C.
 
 Plus ORT arenas. Loading everything doesn't fit in 3.4 GB alongside the existing stack.
 
+**WP7 status (2026-10-08):** built and tested on amd64; arm64 builds in CI; Pi hardware not tested yet.
+- `Dockerfile.cpu` (Debian trixie: bookworm's glibc 2.36 can't link ort's ONNX Runtime, which needs
+  `__isoc23_strtol` from glibc 2.38+). 190 MB compressed.
+- `scripts/quantize_models.py`: int8 GTR 110 MB (worst cosine 0.993) and EmbeddingGemma 2 295 MB (worst
+  0.988; quantizing every MatMul gave 0.977, so layer 23 and the output projection stay fp32). Against the
+  fp32 production service: GTR >= 0.9965, EmbeddingGemma 2 >= 0.981 on three test texts.
+- `deepbluedynamics/shivvr-models:int8` (amd64 + arm64) and `deploy/halos/shivvr` (HaLOS app: one-shot
+  model installer + service on 127.0.0.1:8285, token cap 512, 1500m memory cap). Local run: ~820 MiB
+  with both models; models copied on first boot, skipped on later boots.
+- `.github/workflows/release.yml`: `cpu-build` (native amd64 / ubuntu-24.04-arm runners, push by digest)
+  and `cpu-merge` (multi-arch manifest, `-cpu` tags), following grubcrawler's workflow.
+- Left: measure latency, memory and temperature on a Pi 5; add `icon.png`; submit `deploy/halos/shivvr`
+  to halos-marine-containers; retrieval eval of int8 vs fp32 (section 4.2).
+
 **Plan for a Pi build (WP7):**
 1. **Choose models per deployment.** Each model is already optional at startup, so a Pi profile can just
    leave files out (e.g. GTR + EmbeddingGemma 2 text only, no inverter or SigLIP). Add a

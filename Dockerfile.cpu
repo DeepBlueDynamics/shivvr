@@ -1,0 +1,73 @@
+# CPU-only shivvr for linux/amd64 and linux/arm64 (Raspberry Pi 5 / HaLOS).
+#
+# No CUDA and no models baked in: mount a model directory at /models. Build the
+# int8 set for small machines with scripts/quantize_models.py, or mount the full
+# fp32 set. Every model except GTR-T5-base is optional; a missing file only
+# disables that model (check /health).
+#
+#   docker buildx build --platform linux/arm64 -f Dockerfile.cpu -t shivvr-cpu .
+#   docker run -p 127.0.0.1:8080:8080 -v ./models-int8:/models:ro shivvr-cpu
+
+# Stage 1: Rust build. Debian trixie (glibc 2.41): the ONNX Runtime that ort
+# downloads needs glibc >= 2.38 (__isoc23_strtol), so bookworm (2.36) fails to link.
+FROM debian:trixie-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev g++ ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 10 https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain 1.88.0
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+
+# Dependency layer first (lume-hybrid is vendored under vendor/).
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY vendor ./vendor
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/bin/gateway.rs \
+    && cargo build --release --locked --bin shivvr || true
+RUN rm -rf src
+
+COPY src ./src
+RUN touch src/main.rs && cargo build --release --locked --bin shivvr
+
+# ort's download-binaries may link ONNX Runtime dynamically; carry any shared
+# libraries it fetched into the runtime image.
+RUN mkdir -p /ort-libs \
+    && find /root/.cache/ort.pyke.io -name "libonnxruntime*.so*" -exec cp {} /ort-libs/ \; 2>/dev/null || true
+
+# Stage 2: runtime
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3t64 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/shivvr /usr/local/bin/shivvr
+COPY --from=builder /ort-libs /usr/lib/onnxruntime/
+
+ENV LD_LIBRARY_PATH=/usr/lib/onnxruntime
+ENV PORT=8080
+# Containers must listen on all interfaces; publish the port on 127.0.0.1 on the host
+# unless other machines need it.
+ENV BIND_ADDR=0.0.0.0
+ENV MODEL_PATH=/models/gtr-t5-base.onnx
+ENV TOKENIZER_PATH=/models/tokenizer.json
+ENV EMBEDDINGGEMMA2_MODEL_PATH=/models/embeddinggemma2-text.onnx
+ENV EMBEDDINGGEMMA2_TOKENIZER_PATH=/models/embeddinggemma2-tokenizer.json
+ENV VISION_MODEL_PATH=/models/siglip-vision.onnx
+ENV SIGLIP_TEXT_MODEL_PATH=/models/siglip-text.onnx
+ENV SIGLIP_TOKENIZER_PATH=/models/siglip-tokenizer.json
+ENV INVERTER_PROJECTION_PATH=/models/inverter/projection.onnx
+ENV INVERTER_ENCODER_PATH=/models/inverter/encoder.onnx
+ENV INVERTER_DECODER_PATH=/models/inverter/decoder.onnx
+ENV INVERTER_TOKENIZER_PATH=/models/inverter/tokenizer.json
+ENV GUARDRAILS_DIR=/data/guardrails
+
+VOLUME ["/models"]
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
+    CMD curl -fsS http://127.0.0.1:8080/health > /dev/null || exit 1
+
+CMD ["/usr/local/bin/shivvr"]

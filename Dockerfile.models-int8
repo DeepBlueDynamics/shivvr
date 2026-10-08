@@ -1,0 +1,17 @@
+# int8 model set for CPU / Raspberry Pi deployments, as a small multi-arch image.
+# It does nothing but copy its /models into a volume, then exit; the HaLOS app
+# (deploy/halos/shivvr) runs it before shivvr starts.
+#
+# The build context is the output directory of scripts/quantize_models.py:
+#
+#   python scripts/quantize_models.py --input_dir models --output_dir models-int8
+#   docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.models-int8 \
+#     -t deepbluedynamics/shivvr-models:int8 --push models-int8
+
+FROM busybox:1.37
+
+COPY . /models/
+
+# Copy only when the volume holds a different model set (.models-version is a
+# content hash written by quantize_models.py), so boots don't rewrite the SD card.
+CMD ["sh", "-c", "if [ \"$(cat /target/.models-version 2>/dev/null)\" = \"$(cat /models/.models-version)\" ]; then echo \"models up to date ($(cat /models/.models-version))\"; else rm -rf /target/* /target/.models-version && cp -a /models/. /target/ && echo \"models installed ($(cat /models/.models-version))\"; fi"]

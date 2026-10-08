@@ -1,0 +1,71 @@
+# Configuration schema for shivvr (HaLOS container app).
+
+version: "1.0"
+
+groups:
+  - id: network
+    label: Network Settings
+    description: Where the API listens
+    fields:
+      - id: HTTP_PORT
+        label: HTTP Port
+        type: integer
+        default: 8285
+        min: 1024
+        max: 65535
+        required: true
+        description: Host port for the API and status page
+      - id: BIND_HOST
+        label: Listen Address
+        type: enum
+        default: "127.0.0.1"
+        options: ["127.0.0.1", "0.0.0.0"]
+        required: true
+        description: 127.0.0.1 keeps shivvr on this device (Signal K plugins can still reach it). 0.0.0.0 exposes it to the boat network.
+
+  - id: models
+    label: Models
+    description: Embedding model settings
+    fields:
+      - id: EMBEDDINGGEMMA2_MAX_TOKENS
+        label: EmbeddingGemma 2 Token Cap
+        type: integer
+        default: 512
+        min: 16
+        max: 8192
+        required: true
+        description: Longer inputs are truncated. Cost grows faster than linearly with length, so keep this low on a Pi.
+      - id: MODELS_TAG
+        label: Model Set
+        type: string
+        default: int8
+        required: true
+        description: Tag of deepbluedynamics/shivvr-models to install (int8 = GTR-T5-base + EmbeddingGemma 2 text)
+
+  - id: resources
+    label: Resources
+    description: Limits and versions
+    fields:
+      - id: MEMORY_LIMIT
+        label: Memory Limit
+        type: string
+        default: 1500m
+        required: true
+        description: Container memory cap (Docker syntax, e.g. 1500m, 2g)
+      - id: SHIVVR_TAG
+        label: Image Tag
+        type: string
+        default: latest-cpu
+        required: true
+        description: Tag of deepbluedynamics/shivvr (CPU builds end in -cpu)
+
+  - id: auth
+    label: Authentication
+    description: Optional nuts-auth token checks
+    fields:
+      - id: NUTS_AUTH_JWKS_URL
+        label: nuts-auth JWKS URL
+        type: string
+        default: ""
+        required: false
+        description: Leave empty for no authentication (fine while bound to 127.0.0.1)

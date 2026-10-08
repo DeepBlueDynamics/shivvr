@@ -1,4 +1,4 @@
-name: Release gateway image
+name: Release images
 
 # Fires when a version tag (v0.3.0, v0.4.0, ...) is pushed.
 #
@@ -6,6 +6,10 @@ name: Release gateway image
 # it to GHCR as ghcr.io/deepbluedynamics/shivvr-gateway with semver + :latest
 # tags. If the repo has DOCKER_USERNAME / DOCKER_TOKEN secrets, the same image
 # is also pushed to Docker Hub as deepbluedynamics/shivvr-gateway.
+#
+# Also builds Dockerfile.cpu for linux/amd64 + linux/arm64 (cpu-build, cpu-merge)
+# and publishes ghcr.io/deepbluedynamics/shivvr with -cpu tags (and Docker Hub
+# deepbluedynamics/shivvr when the secrets exist).
 #
 # The CUDA app image (Dockerfile) is NOT built here: it copies ~2.2 GB of
 # gitignored ONNX models from models/, so it stays on Cloud Build via
@@ -90,3 +94,122 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # CPU image (Dockerfile.cpu) for linux/amd64 and linux/arm64 (Raspberry Pi 5 /
+  # HaLOS), no models baked in. Each platform builds on a native runner and is
+  # pushed by digest; cpu-merge then publishes one multi-arch manifest with
+  # -cpu tags (0.5.2-cpu, v0.5.2-cpu, latest-cpu). Same pattern as grubcrawler's
+  # release workflow. Runs after `release` so the tag/version check gates it.
+  cpu-build:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            slug: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cpu
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/deepbluedynamics/shivvr,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=cpu-${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=cpu-${{ matrix.slug }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-cpu-${{ matrix.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  cpu-merge:
+    needs: cpu-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-cpu-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker Hub credentials present?
+        id: hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          if [ -n "${DOCKER_USERNAME}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "DOCKER_USERNAME secret not set; skipping Docker Hub push"
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.hub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Extract metadata (tags)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/deepbluedynamics/shivvr
+            ${{ steps.hub.outputs.enabled == 'true' && 'deepbluedynamics/shivvr' || '' }}
+          flavor: |
+            suffix=-cpu,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
+            type=raw,value=latest
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          # The -t flags and the digest list must word-split.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/deepbluedynamics/shivvr@sha256:%s ' *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect "$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"

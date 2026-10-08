@@ -115,6 +115,28 @@ Builds from source with CUDA, with models copied in from the prebuilt models ima
 Listens on `:8080` inside the container; compose maps it to `:8085`. No volume needed.
 The examples below use `localhost:8080`; through compose, use `localhost:8085`.
 
+### Prebuilt images
+
+| Image | Tags | What |
+|---|---|---|
+| `deepbluedynamics/shivvr` | `X.Y.Z`, `vX.Y.Z`, `latest` | CUDA build, all models baked in (linux/amd64) |
+| `deepbluedynamics/shivvr` | `X.Y.Z-cpu`, `vX.Y.Z-cpu`, `latest-cpu` | CPU build, no models (linux/amd64, linux/arm64); mount a model directory at `/models` |
+| `deepbluedynamics/shivvr-models` | `int8` | int8 GTR-T5-base + EmbeddingGemma 2 text (440 MB) for the CPU build |
+| `deepbluedynamics/shivvr-gateway` | `X.Y.Z`, `vX.Y.Z`, `latest` | GPU-less front door (auth, landing page, proxy) |
+
+```bash
+docker run --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr              # CUDA
+docker run -p 127.0.0.1:8080:8080 -v ./models-int8:/models:ro deepbluedynamics/shivvr:latest-cpu
+```
+
+### CPU and Raspberry Pi
+
+`Dockerfile.cpu` builds without CUDA for amd64 and arm64 on Debian trixie (the ONNX Runtime that
+`ort` downloads needs glibc >= 2.38). `scripts/quantize_models.py` turns the fp32 exports into the
+int8 set and checks each model against fp32. `deploy/halos/` is a HaLOS container app (Raspberry
+Pi 5) that installs the int8 models and runs the CPU image on `127.0.0.1:8285`; see
+[deploy/halos/README.md](deploy/halos/README.md).
+
 ## API
 
 ### Sessions
@@ -398,7 +420,8 @@ Leave `NUTS_AUTH_JWKS_URL` unset for open dev mode.
 is tagged `v<version>`. `.github/workflows/release.yml` builds the gateway image on tag push to
 `ghcr.io/deepbluedynamics/shivvr-gateway` (and to Docker Hub as `deepbluedynamics/shivvr-gateway`
 when the repo has `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets), and refuses a tag that does not
-match `Cargo.toml`. The CUDA app image is built on Cloud Build by `deploy.sh` as
+match `Cargo.toml`. The same workflow builds the CPU image for amd64 and arm64 on native runners
+and publishes one multi-arch manifest with `-cpu` tags. The CUDA app image is built on Cloud Build by `deploy.sh` as
 `gcr.io/gnosis-459403/shivvr:v<version>`. Full procedure: [OPERATIONS.md](OPERATIONS.md#versioning--releases).
 
 ## License

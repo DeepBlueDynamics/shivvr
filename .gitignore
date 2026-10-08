@@ -33,3 +33,4 @@ training/**/__pycache__/
 
 # written by the service on first start (default guardrail list)
 guardrails/
+models-int8/

@@ -1,2 +1,6 @@
 target/
 .git/
+models/
+models-int8/
+training/
+guardrails/

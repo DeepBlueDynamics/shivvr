@@ -1,0 +1,38 @@
+services:
+  # One-shot: copies the int8 model set into the shivvr-models volume when it
+  # changed, then exits.
+  shivvr-models:
+    image: deepbluedynamics/shivvr-models:${MODELS_TAG:-int8}
+    container_name: shivvr-models
+    restart: "no"
+    volumes:
+      - shivvr-models:/target
+
+  shivvr:
+    image: deepbluedynamics/shivvr:${SHIVVR_TAG:-latest-cpu}
+    container_name: shivvr
+    restart: unless-stopped
+    depends_on:
+      shivvr-models:
+        condition: service_completed_successfully
+    ports:
+      # Loopback by default: Signal K plugins on the same Pi (lume) reach it at
+      # http://127.0.0.1:${HTTP_PORT}. Set BIND_HOST=0.0.0.0 to expose it on the boat network.
+      - "${BIND_HOST:-127.0.0.1}:${HTTP_PORT:-8285}:8080"
+    volumes:
+      - shivvr-models:/models:ro
+      - shivvr-data:/data
+    environment:
+      - EMBEDDINGGEMMA2_MAX_TOKENS=${EMBEDDINGGEMMA2_MAX_TOKENS:-512}
+      - NUTS_AUTH_JWKS_URL=${NUTS_AUTH_JWKS_URL:-}
+    mem_limit: ${MEMORY_LIMIT:-1500m}
+    networks:
+      - shivvr-net
+
+volumes:
+  shivvr-models:
+  shivvr-data:
+
+networks:
+  shivvr-net:
+    driver: bridge

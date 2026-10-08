@@ -1,0 +1,40 @@
+{
+  "name": "shivvr",
+  "package_name": "shivvr-container",
+  "version": "0.5.2-1",
+  "upstream_version": "0.5.2",
+  "description": "Local semantic embeddings and search for onboard data",
+  "long_description": "shivvr chunks text, embeds it with GTR-T5-base and EmbeddingGemma 2 (int8, CPU), and serves vector, BM25 and hybrid search over ephemeral sessions. Runs entirely on the boat with no cloud calls; Signal K plugins such as Lume use it for embeddings over HTTP.",
+  "homepage": "https://shivvr.nuts.services",
+  "icon": "icon.png",
+  "screenshots": [],
+  "maintainer": "Kord Campbell <kordless@gmail.com>",
+  "license": "BSD-3-Clause",
+  "tags": [
+    "role::container-app",
+    "field::marine",
+    "interface::web",
+    "network::server",
+    "use::searching"
+  ],
+  "debian_section": "net",
+  "architecture": "arm64",
+  "depends": [
+    "docker.io (>= 20.10) | docker-ce (>= 20.10)"
+  ],
+  "web_ui": {
+    "enabled": true,
+    "path": "/",
+    "port": 8285,
+    "protocol": "http"
+  },
+  "default_config": {
+    "HTTP_PORT": "8285",
+    "BIND_HOST": "127.0.0.1",
+    "EMBEDDINGGEMMA2_MAX_TOKENS": "512",
+    "MEMORY_LIMIT": "1500m",
+    "SHIVVR_TAG": "latest-cpu",
+    "MODELS_TAG": "int8",
+    "NUTS_AUTH_JWKS_URL": ""
+  }
+}
