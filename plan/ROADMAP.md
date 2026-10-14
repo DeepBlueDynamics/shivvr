@@ -37,11 +37,13 @@ Status: ✅ done · 🟡 in progress / in review · ⬜ not started · ⛔ block
 | Unit + integration tests; CPU image builds on Rust 1.88; CPU smoke test | ✅ |
 | `tests/functional.py` against a live server; CUDA image build | ⬜ runs during release |
 
-**Gates before merge/release:**
-- ⛔ **Lume's path-2 change**: its scratch-ingest → `/invert` call must move to `POST /embed`
-  `{"model":"gtr-t5-base"}` (~15 lines in lume `src/hybrid.rs`). Needs Kord's OK; it works on 0.5.x
-  too, so it can ship first.
-- Kord merges PR #13 (merge or rebase, not squash, so `release: v0.6.0` stays its own commit).
+**Gates before release:**
+- ✅ **Lume's path 2**: Kord dropped the `/invert` step from `lume generate` instead (lume PR #68,
+  merged 2026-10-14). The steered generator scores candidates in the scratch store's own space, so it
+  works with Gemma. Left on lume's side: released lume 0.16.0 still adds one garbage seed step until
+  lume's next release, and the opt-in `LUME_QUERY_INVERSION=1` debug line prints garbage (lume offers to
+  pin `gtr-t5-base` there; Kord's call).
+- ✅ PR #13 merged 2026-10-14 (`25276cf`).
 
 **Release steps:**
 1. Tag `v0.6.0`. CI publishes the gateway and the amd64/arm64 CPU images to Docker Hub.
@@ -133,7 +135,7 @@ M4 (WP3 first), and the M5 pilot on the local 3060.
 
 | # | Decision | Default if nobody decides |
 |---|---|---|
-| D1 | Lume path-2 change approved? (gates M1) | — |
+| D1 | ~~Lume path-2 change~~: resolved by lume PR #68 (generator no longer calls `/invert`) | — |
 | D2 | CUDA image build on tag: GitHub Actions large runner vs Cloud Build trigger | Cloud Build trigger (models image already in GCR) |
 | D3 | Image tag names for the four images (`latest`/`latest-cpu` vs `gpu`/`cpu`) | Keep `latest` (CUDA) and `latest-cpu` |
 | D4 | Training data consent: may ingested session text ever be used for eval/training? | No |
