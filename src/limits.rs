@@ -1,4 +1,4 @@
-//! Request budgets shared by the router and documented in README.md.
+//! Request budgets shared by the router and documented in docs/API.md.
 //!
 //! Kept free of the `ml` feature so the pure helpers are unit-testable
 //! without ONNX Runtime.

@@ -7,7 +7,7 @@ SERVICE="shivvr"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}"
 MODELS_IMAGE="gcr.io/${PROJECT_ID}/shivvr-models"
 
-# Version comes from Cargo.toml, the single source of truth (see OPERATIONS.md -> Versioning).
+# Version comes from Cargo.toml, the single source of truth (see docs/OPERATIONS.md -> Versioning).
 # Images are pushed as :v<version> and :latest so a revision can always be traced to a tag.
 VERSION="$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -1)"
 TAG="v${VERSION}"

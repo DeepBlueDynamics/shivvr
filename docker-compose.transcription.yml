@@ -1,0 +1,16 @@
+# Optional override that attaches shivvr to an external hyperia-transcription
+# Docker network (transcription_default) for /audio/* and audio_base64 ingest:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.transcription.yml up -d
+
+services:
+  shivvr:
+    networks:
+      - default
+      - transcription_net
+
+networks:
+  default:
+  transcription_net:
+    external: true
+    name: transcription_default

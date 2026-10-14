@@ -2,6 +2,47 @@
 
 Status as of 2026-10-06. Owner: Kord. Work packages (WP) are sized for one worker each.
 
+## 0. Direction (decided 2026-10-14)
+
+**EmbeddingGemma 2 is the default model; GTR-T5-base stays and can be selected.**
+- `/embed`, session and temp ingest, and search use `embeddinggemma-2` unless the request names
+  `gtr-t5-base`. Ingest applies the `document` prefix and search the `query` prefix automatically.
+- A session or temp store takes its model on its first ingest (optional `model`) and keeps it.
+  Search embeds with the session's model. Mixing models in one session is rejected.
+- `/invert` stays GTR-only, so sessions that need inversion choose `gtr-t5-base`.
+- SigLIP stays for images until EmbeddingGemma 2's vision path (WP3) lands, then retires.
+  Native audio (WP4) replaces transcribe-then-embed for `/audio/embed`.
+- Breaking change for clients that relied on the GTR default (e.g. lume), so it ships as 0.6.0.
+
+**Four images, one release:**
+
+| Image | Runs | Contents |
+|---|---|---|
+| `shivvr:gpu` | Local NVIDIA | CUDA, all models built in |
+| `shivvr:cpu` | Local CPU, Pi (amd64 + arm64) | CPU build **with the int8 models built in** (one `docker run`, no models volume) |
+| Cloud frontend | Cloud Run `shivvr-landing` | Gateway: auth, docs page, wakes the backend |
+| Cloud backend | Cloud Run `shivvr` | Only the models the cloud serves; GPU only if the benchmark shows it pays |
+
+A tag push builds all four, pushes them to Docker Hub and GCR, and deploys the cloud pair. No hand copies.
+
+**Lume 0.16 instead of the vendored copy (0.6.0):** replace `vendor/lume-hybrid` (a 2026-06 snapshot)
+with `lume = { git = "https://github.com/DeepBlueDynamics/lume", tag = "v0.16.0", default-features = false }`
+and rename `lume_hybrid::` → `lume::`. The APIs shivvr uses are unchanged (Tagger, Entry, bm25::Section,
+Bm25Index::build/search, SearchVariant, regex). `Bm25Params` gained `coord_floor` (we use `::default()`).
+Behavior change: `Bm25Index::build` now stems and uses coord floor 1.0, so hybrid/lexical rankings shift,
+judged better in lume's evals. MaxScore pruning cut BM25 p50 from 111.6 to 6.77 ms in lume's TREC-COVID
+benchmark (lume's numbers, not measured in shivvr), with identical rankings. Later: adapt lume's fusion
+modes (RRF k=60, normalized-v2) from `hybrid::blend_hybrid_scores_with_mode`. Not worth it for
+ephemeral sessions: spelling, semantic mesh, graph boost.
+
+**Lume compatibility:** lume's scratch-ingest → `/invert` path must send GTR. Lume will switch it to
+`POST /embed {"model":"gtr-t5-base"}` (works on 0.5.x). Its temp-store search is covered by per-store
+pinning plus server-side prefixes. Don't release 0.6.0 until Kord confirms the lume change.
+
+**Order:** README/repo cleanup → default switch (0.6.0) → CPU image with built-in models → single
+release pipeline → GPU export fix and L4 benchmark (decides GPU vs CPU for the cloud backend)
+→ WP3/WP4 (images, audio) and retire SigLIP.
+
 ## 1. The model
 
 `google/embeddinggemma-2` (Apache 2.0, not gated).
@@ -43,7 +84,7 @@ separate tower output like SigLIP's.
   files are copied into the existing stage. Cloud Build timeout raised to 3600s.
 - Env vars `EMBEDDINGGEMMA2_MODEL_PATH` and `EMBEDDINGGEMMA2_TOKENIZER_PATH` in the Dockerfile,
   docker-compose, README and OPERATIONS.
-- Docs: OPERATIONS.md has the models-image contents, `/health` model list and a troubleshooting entry;
+- Docs: docs/OPERATIONS.md has the models-image contents, `/health` model list and a troubleshooting entry;
   the backend homepage and landing page (`src/api.rs`, `src/landing.html`) list the `/embed` models and
   the `task`/`dimensions` fields. The MCP tools do not expose `/embed`, and there is no
   OpenAI-compatible `/v1/embeddings` route, so neither needed changes.
