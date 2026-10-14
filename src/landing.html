@@ -141,7 +141,7 @@
   <h1>shivvr 🔪 <span class="ver">v{{VERSION}}</span></h1>
   <p class="sub">Ephemeral semantic embedding & cognitive agent service.</p>
   <p class="desc">
-    Chunk text. Embed with GTR-T5-base, SigLIP or EmbeddingGemma 2. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
+    Chunk text. Embed it with EmbeddingGemma 2 (the default) while a GTR-T5-base vector is kept alongside every chunk, so anything stored can be inverted back to text. Images embed with SigLIP until EmbeddingGemma 2's own vision path lands. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
   </p>
   <div class="ctas">
     <a class="cta" href="#api">View API</a>
@@ -166,7 +166,11 @@
 <div class="features">
   <div class="feature">
     <div class="name">Ingest</div>
-    <p>Sentence-boundary chunking + EmbeddingGemma 2 (default, 768d) or GTR-T5-base embeddings. Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
+    <p>Sentence-boundary chunking + EmbeddingGemma 2 (default, 768d) or GTR-T5-base embeddings. Each session or temp store keeps the model it was created with. Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
+  </div>
+  <div class="feature">
+    <div class="name">Inversion</div>
+    <p>Every chunk also keeps a GTR-T5-base vector (no extra inference). Ask for it with <code>return_vectors</code> and <code>/invert</code> turns it back into approximate text, whatever the session's search model.</p>
   </div>
   <div class="feature">
     <div class="name">FST-BM25 Hybrid Search</div>
@@ -186,7 +190,7 @@
   </div>
   <div class="feature">
     <div class="name">Dual embedding</div>
-    <p><code>organize</code> role uses GTR-T5-base (768d). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d) — pass your own key or set server-side.</p>
+    <p><code>organize</code> role uses the store's text model (EmbeddingGemma 2 by default, or GTR-T5-base; 768d). <code>retrieve</code> role uses OpenAI text-embedding-ada-002 (1536d) — pass your own key or set server-side.</p>
   </div>
 </div>
 
@@ -211,11 +215,11 @@
   <tr><td class="method">POST</td><td><code>/agent/:id/register</code></td><td>Register per-agent orthogonal key</td></tr>
   <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
-  <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
+  <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct approximate text from a GTR-T5-base vector (every chunk keeps one; see <code>return_vectors</code>)</td></tr>
   <tr><td class="method">POST</td><td><code>/embed</code></td><td>Batched text vectors, no store side effects. <code>model</code>: <code>embeddinggemma-2</code> (default, 768d; optional <code>task</code> and <code>dimensions</code>, see below), <code>gtr-t5-base</code> (768d) or <code>siglip-base-patch16-224</code> (SigLIP text space, comparable with <code>/image/embed</code>)</td></tr>
-  <tr><td class="method">POST</td><td><code>/image/embed</code></td><td>SigLIP image vector (768d) from <code>image_base64</code>; same space as SigLIP text</td></tr>
+  <tr><td class="method">POST</td><td><code>/image/embed</code></td><td>SigLIP image vector (768d) from <code>image_base64</code>; same space as SigLIP text. EmbeddingGemma 2 images replace SigLIP once its vision path is served</td></tr>
   <tr><td class="method">POST</td><td><code>/audio/transcribe</code></td><td>Transcript from <code>audio_base64</code> via the transcription service</td></tr>
-  <tr><td class="method">POST</td><td><code>/audio/embed</code></td><td>Transcript + GTR-T5 vector from <code>audio_base64</code></td></tr>
+  <tr><td class="method">POST</td><td><code>/audio/embed</code></td><td>Transcript + text vector from <code>audio_base64</code> (<code>embeddinggemma-2</code> by default, or <code>model: gtr-t5-base</code>)</td></tr>
 </table>
 </div>
 <p class="hint">Request limits: 32 MiB bodies on image, audio and ingest routes, 8 MiB on <code>/embed</code>, 2 MiB elsewhere; 120 s server timeout on inference routes, 30 s on the rest.</p>
@@ -238,6 +242,14 @@ curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" "https://shivvr.nuts.ser
 <span class="cm"># High-speed Lexical-Only BM25 Search (Bypasses ONNX embedder)</span>
 curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" "https://shivvr.nuts.services/sessions/my-session/search?q=Opossum&amp;lexical_only=true"
 
+<span class="cm"># Ingest and get each chunk's GTR vector too, then invert it back to text</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"text": "The harbor was quiet at dawn.", "return_vectors": ["gtr-t5-base"]}'
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/invert \
+  -H "Content-Type: application/json" \
+  -d '{"embedding": [/* chunks[0].embeddings["gtr-t5-base"] */], "model": "gtr-t5-base"}'
+
 <span class="cm"># Text vectors with EmbeddingGemma 2 (query prefix, 256d)</span>
 curl -X POST https://shivvr.nuts.services/embed \
   -H "Content-Type: application/json" \
@@ -257,7 +269,7 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td><code>hybrid</code></td><td>false</td><td>Blend semantic vectors + BM25 scores (Reciprocal Rank Fusion)</td></tr>
   <tr><td><code>lexical_only</code></td><td>false</td><td>Bypass vector embedder, execute pure BM25 search</td></tr>
   <tr><td><code>guardrail</code></td><td>true</td><td>Enable FST toxic term scanning and automatic query blocking</td></tr>
-  <tr><td><code>role</code></td><td>organize</td><td><code>organize</code> (768d local) or <code>retrieve</code> (1536d OpenAI)</td></tr>
+  <tr><td><code>role</code></td><td>organize</td><td><code>organize</code> (768d, the store's text model; the query gets EmbeddingGemma 2's <code>query</code> prefix) or <code>retrieve</code> (1536d OpenAI)</td></tr>
   <tr><td><code>time_weight</code></td><td>0.0</td><td>Blend semantic + recency score (0–1)</td></tr>
   <tr><td><code>decay_halflife_hours</code></td><td>168</td><td>Recency decay half-life in hours</td></tr>
   <tr><td><code>include_nearby</code></td><td>false</td><td>Return temporally adjacent chunks</td></tr>
@@ -265,6 +277,19 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td><code>openai_api_key</code></td><td>—</td><td>Per-request OpenAI key for <code>retrieve</code> role (overrides server key)</td></tr>
 </table>
 </div>
+
+<!-- Ingest request -->
+<h2>Ingest request (<code>POST /sessions/:id/ingest</code>, <code>/temp/:name/ingest</code>)</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>text</code></td><td>required</td><td>Text to chunk and embed</td></tr>
+  <tr><td><code>model</code></td><td>embeddinggemma-2</td><td>The store's text model: <code>embeddinggemma-2</code> or <code>gtr-t5-base</code>. Set on the first ingest; later ingests use the store's model, and naming a different one is a 400</td></tr>
+  <tr><td><code>return_vectors</code></td><td>none</td><td><code>["gtr-t5-base"]</code> returns each chunk's GTR vector under <code>embeddings</code>, ready for <code>/invert</code></td></tr>
+  <tr><td><code>source</code>, <code>metadata</code></td><td>—</td><td>Stored on every chunk</td></tr>
+</table>
+</div>
+<p class="hint">Response: <code>{"chunks_created", "tokens_processed", "time_ms", "model", "chunks"}</code>; each chunk's <code>embedding</code> is the store's search vector.</p>
 
 <!-- Embed request -->
 <h2>Embed request (<code>POST /embed</code>)</h2>
@@ -312,7 +337,18 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td><code>deepbluedynamics/shivvr-gateway</code></td><td>The GPU-less front door: auth, this page, and a proxy to the backend (<code>latest</code>, <code>X.Y.Z</code>, <code>vX.Y.Z</code>; linux/amd64)</td></tr>
 </table>
 </div>
-<p class="hint">GPU: <code>docker run --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr</code> &middot; CPU: populate a <code>shivvr-models</code> volume with <code>deepbluedynamics/shivvr-models:int8</code> and mount at <code>/models:ro</code> on <code>deepbluedynamics/shivvr:latest-cpu</code>.</p>
+<h2>Run it yourself</h2>
+<pre><code><span class="cm"># GPU: all models are in the image (~4.4 GB pull)</span>
+docker run -d --name shivvr --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr
+
+<span class="cm"># CPU (amd64/arm64, incl. Raspberry Pi 5):</span>
+<span class="cm"># 1. a volume for the models</span>
+docker volume create shivvr-models
+<span class="cm"># 2. copy the int8 models (440 MB) into it; this fills /target, replacing what's there, and exits</span>
+docker run --rm -v shivvr-models:/target deepbluedynamics/shivvr-models:int8
+<span class="cm"># 3. start shivvr with the models mounted read-only</span>
+docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v shivvr-models:/models:ro deepbluedynamics/shivvr:latest-cpu
+</code></pre>
 
 <h2>Stack</h2>
 <div class="tbl-wrap">
@@ -321,12 +357,13 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td>Runtime</td><td>Rust + Tokio + axum</td></tr>
   <tr><td>Cognition</td><td>GhostAgent cognitive RAG turn loop (OpenAI / Anthropic compat)</td></tr>
   <tr><td>MCP Server</td><td>HTTP/SSE JSON-RPC 2.0 Model Context Protocol transport layer</td></tr>
-  <tr><td>Hybrid Index</td><td>Tantivy FST deterministic phrase engine + BM25F field indexer</td></tr>
+  <tr><td>Hybrid Index</td><td><a href="https://github.com/DeepBlueDynamics/lume">Lume</a> 0.16: FST phrase tagger + stemmed BM25 with MaxScore pruning</td></tr>
   <tr><td>Embedding</td><td>EmbeddingGemma 2 (768d default, Matryoshka to 512/256/128) &amp; GTR-T5-base (768d) via ONNX Runtime 2.0</td></tr>
   <tr><td>Text embedding (<code>/embed</code>)</td><td>EmbeddingGemma 2 (default), GTR-T5-base, SigLIP text tower (768d, shared space with <code>/image/embed</code>)</td></tr>
   <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
   <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
-  <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>
+  <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) on the GTR vector every chunk keeps</td></tr>
+  <tr><td>Images</td><td>SigLIP base patch16-224 for now; EmbeddingGemma 2 vision replaces it once served</td></tr>
 </table>
 </div>
 
