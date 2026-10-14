@@ -9,7 +9,8 @@ use std::sync::RwLock;
 pub struct Chunk {
     pub id: String,
     pub text: String,
-    /// Organize embedding (768d, gtr-t5-base)
+    /// Organize embedding (768d), from the session's text model
+    /// (`embeddinggemma-2` by default, or `gtr-t5-base`)
     pub embedding: Vec<f32>,
     /// Retrieve embedding (1536d, ada-002) — optional
     #[serde(default)]
@@ -38,7 +39,30 @@ pub struct SessionMeta {
     pub last_ingested: DateTime<Utc>,
     pub chunk_count: usize,
     pub total_tokens: usize,
+    /// Text model that produced this session's organize vectors.
+    pub model: String,
 }
+
+/// An ingest named a different text model than the one the session or temp
+/// store was created with. Vectors from different models are not comparable,
+/// so the ingest is refused.
+#[derive(Debug)]
+pub struct ModelMismatch {
+    pub store_model: String,
+    pub requested: String,
+}
+
+impl std::fmt::Display for ModelMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this store holds {} vectors; cannot add {} vectors (use a new session for another model)",
+            self.store_model, self.requested
+        )
+    }
+}
+
+impl std::error::Error for ModelMismatch {}
 
 struct Session {
     chunks: Vec<Chunk>,
@@ -46,6 +70,8 @@ struct Session {
     created_at: DateTime<Utc>,
     last_ingested: DateTime<Utc>,
     total_tokens: usize,
+    /// Text model fixed on creation (first ingest).
+    model: String,
     /// Identity of the caller who created this session (user_id from auth claims).
     /// None = created in open dev mode (no auth) — accessible to anyone.
     owner: Option<String>,
@@ -63,8 +89,36 @@ impl Store {
         }
     }
 
+    /// Fix a session's text model before ingesting into it: creates the
+    /// session (with `owner`) if it doesn't exist, records `model` if none is
+    /// set yet, and fails with [`ModelMismatch`] if it holds another model.
+    pub fn claim_model(&self, session_id: &str, model: &str, owner: Option<&str>) -> std::result::Result<(), ModelMismatch> {
+        let now = Utc::now();
+        let mut sessions = self.sessions.write().unwrap();
+        let session = sessions.entry(session_id.to_string()).or_insert_with(|| Session {
+            chunks: Vec::new(),
+            bm25_index: None,
+            created_at: now,
+            last_ingested: now,
+            total_tokens: 0,
+            model: String::new(),
+            owner: owner.map(|s| s.to_string()),
+        });
+        if session.model.is_empty() {
+            session.model = model.to_string();
+        }
+        if session.model != model {
+            return Err(ModelMismatch {
+                store_model: session.model.clone(),
+                requested: model.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Add chunks to a session (creates session if it doesn't exist).
     /// `owner` is set only on creation — subsequent ingests don't change it.
+    /// Call [`Store::claim_model`] first so the session records its model.
     pub fn add_chunks(&self, session_id: &str, chunks: Vec<Chunk>, owner: Option<&str>) -> Result<()> {
         let tokens: usize = chunks.iter().map(|c| c.token_count).sum();
         let now = Utc::now();
@@ -76,6 +130,7 @@ impl Store {
             created_at: now,
             last_ingested: now,
             total_tokens: 0,
+            model: String::new(),
             owner: owner.map(|s| s.to_string()),
         });
 
@@ -116,6 +171,16 @@ impl Store {
         }
     }
 
+    /// The text model a session was created with, or `None` if the session
+    /// doesn't exist or has no model recorded yet.
+    pub fn session_model(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .get(session_id)
+            .map(|s| s.model.clone())
+            .filter(|m| !m.is_empty())
+    }
+
     /// Get all chunks for a session
     pub fn get_chunks(&self, session_id: &str) -> Result<Vec<Chunk>> {
         let sessions = self.sessions.read().unwrap();
@@ -134,6 +199,7 @@ impl Store {
             last_ingested: s.last_ingested,
             chunk_count: s.chunks.len(),
             total_tokens: s.total_tokens,
+            model: s.model.clone(),
         }))
     }
 
@@ -165,6 +231,7 @@ impl Store {
                 last_ingested: s.last_ingested,
                 chunk_count: s.chunks.len(),
                 total_tokens: s.total_tokens,
+                model: s.model.clone(),
             })
             .collect())
     }

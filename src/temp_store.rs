@@ -1,5 +1,5 @@
 use crate::similarity::cosine_similarity;
-use crate::store::Chunk;
+use crate::store::{Chunk, ModelMismatch};
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ pub struct TempStoreMeta {
     pub chunk_count: usize,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    pub model: String,
 }
 
 struct TempSession {
@@ -20,6 +21,8 @@ struct TempSession {
     bm25_index: Option<lume_hybrid::bm25::Bm25Index>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    /// Text model fixed on the first ingest; empty until then.
+    model: String,
 }
 
 pub struct TempStore {
@@ -33,6 +36,40 @@ impl TempStore {
         }
     }
 
+    /// Fix a temp store's text model before ingesting: creates the store if
+    /// needed, records `model` if none is set, and fails with
+    /// [`ModelMismatch`] if it holds another model.
+    pub fn claim_model(&self, name: &str, model: &str) -> std::result::Result<(), ModelMismatch> {
+        let now = Utc::now();
+        let mut stores = self.stores.write().unwrap();
+        let session = stores.entry(name.to_string()).or_insert_with(|| TempSession {
+            chunks: Vec::new(),
+            bm25_index: None,
+            created_at: now,
+            expires_at: now + Duration::hours(TEMP_STORE_TTL_HOURS),
+            model: String::new(),
+        });
+        if session.model.is_empty() {
+            session.model = model.to_string();
+        }
+        if session.model != model {
+            return Err(ModelMismatch {
+                store_model: session.model.clone(),
+                requested: model.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The text model a temp store was created with, if any.
+    pub fn store_model(&self, name: &str) -> Option<String> {
+        let stores = self.stores.read().unwrap();
+        stores
+            .get(name)
+            .map(|s| s.model.clone())
+            .filter(|m| !m.is_empty())
+    }
+
     pub fn add_chunks(&self, name: &str, chunks: Vec<Chunk>) -> Result<()> {
         let now = Utc::now();
         let expires_at = now + Duration::hours(TEMP_STORE_TTL_HOURS);
@@ -43,6 +80,7 @@ impl TempStore {
             bm25_index: None,
             created_at: now,
             expires_at,
+            model: String::new(),
         });
 
         session.chunks.extend(chunks);
@@ -87,6 +125,7 @@ impl TempStore {
                 chunk_count: session.chunks.len(),
                 created_at: session.created_at,
                 expires_at: session.expires_at,
+                model: session.model.clone(),
             })
             .collect()
     }

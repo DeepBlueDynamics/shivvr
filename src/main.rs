@@ -1,5 +1,5 @@
 #[cfg(feature = "ml")]
-use shivvr::{api, audio, auth, chunker, crypto, embedder, embeddinggemma, inverter, openai, store, temp_store, vision};
+use shivvr::{api, audio, auth, chunker, crypto, embedder, embeddinggemma, inverter, openai, store, temp_store, text_model, vision};
 #[cfg(feature = "ml")]
 use std::sync::Arc;
 #[cfg(feature = "ml")]
@@ -200,12 +200,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             println!(
-                "EmbeddingGemma 2 text embedder not available: {} — /embed model=embeddinggemma-2 disabled",
+                "EmbeddingGemma 2 text embedder not available: {} — default text model falls back to gtr-t5-base",
                 e
             );
             None
         }
     };
+
+    let text_models = Arc::new(text_model::TextEmbedders::new(embedder.clone(), embeddinggemma2.clone()));
+    println!("Default text model: {}", text_models.default_model());
 
     let state = Arc::new(api::AppState {
         store,
@@ -219,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
         vision_embedder,
         siglip_text,
         embeddinggemma2,
+        text_models,
         start_time: std::time::Instant::now(),
         nuts_auth,
         openai_auth_required,

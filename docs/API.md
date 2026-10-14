@@ -63,12 +63,12 @@ These three routes sit outside the auth gate and the request timeout.
 
 ## Health (`GET /health`)
 
-`GET /health` returns `status`, `version`, `models`, `sessions`, `total_chunks`, `uptime_seconds`, `encryption_available`, `inversion_available`, `audio_available`, `vision_available` and `gpu` (whether the binary was built with the `cuda` feature). Each `models` entry is `{"name", "role", "dimension", "status"}`, listed only when loaded:
+`GET /health` returns `status`, `version`, `default_model` (the text model used when a request names none: `embeddinggemma-2` when loaded, otherwise `gtr-t5-base`), `models`, `sessions`, `total_chunks`, `uptime_seconds`, `encryption_available`, `inversion_available`, `audio_available`, `vision_available` and `gpu` (whether the binary was built with the `cuda` feature). Each `models` entry is `{"name", "role", "dimension", "status"}`, listed only when loaded:
 
 | `name` | `role` | `dimension` | Present when |
 |--------|--------|-------------|--------------|
-| `embeddinggemma-2` | `text` / `organize` | 768 | default embedder for `/embed`, ingest and search |
-| `gtr-t5-base` | `organize` | 768 | GTR-T5-base loaded (`/embed`, ingest/search with `model=gtr-t5-base`, and `/invert`) |
+| `embeddinggemma-2` | `text` | 768 | EmbeddingGemma 2 model and tokenizer loaded; then it is the `default_model` for `/embed`, ingest and search |
+| `gtr-t5-base` | `organize` | 768 | always (required at startup); used for sessions created with `model=gtr-t5-base`, and the only space `/invert` reads |
 | `text-embedding-ada-002` | `retrieve` | 1536 | `OPENAI_API_KEY` set (name and dimension are fixed in `/health` even if `OPENAI_EMBEDDING_MODEL` overrides the model) |
 | `siglip-base-patch16-224` | `multimodal` | 768 | SigLIP vision tower loaded (`/image/embed`) |
 | `siglip-base-patch16-224` | `multimodal-text` | 768 | SigLIP text tower and tokenizer loaded (`/embed`) |
@@ -130,7 +130,7 @@ Vectors from the three models are in different spaces: compare a vector only wit
 
 - `POST /image/embed` takes `{"image_base64": "<base64 PNG/JPEG/WebP>"}` and returns `{"embedding": [...768 floats], "dimension": 768, "model": "siglip-base-patch16-224"}`. Returns `503` if `VISION_MODEL_PATH` is not loaded.
 - `POST /audio/transcribe` takes `{"audio_base64": "<base64 audio>"}` and returns `{"transcript": "..."}` via `TRANSCRIPTION_URL`.
-- `POST /audio/embed` takes `{"audio_base64": "<base64 audio>"}` and returns `{"transcript": "...", "embedding": [...768 floats], "dimension": 768}`.
+- `POST /audio/embed` takes `{"audio_base64": "<base64 audio>", "model": "..."}` (`model` optional: `embeddinggemma-2` default, or `gtr-t5-base`) and returns `{"transcript": "...", "embedding": [...768 floats], "dimension": 768, "model": "..."}`.
 
 ---
 
@@ -175,7 +175,9 @@ Request fields:
 | `audio_base64` | string (optional) | Base64 audio transcribed via `TRANSCRIPTION_URL` and appended to `text` before chunking |
 | `image_base64` | string (optional) | Base64 image embedded with SigLIP vision (768d) and added as a chunk |
 
-The response is `{"chunks_created", "tokens_processed", "time_ms", "chunks"}`, where each item in `chunks` contains `chunk_id`, `text`, `embedding`, `embedding_retrieve` (when `retrieve` is active), `token_count`, `source`, `emotion_primary` and `emotion_secondary`.
+Omit `model` on later ingests to use the store's model. Naming a different model than the store holds returns `400`; use a new session for another model. Chunk boundaries and `token_count` come from the GTR tokenizer whichever model embeds the chunks.
+
+The response is `{"chunks_created", "tokens_processed", "time_ms", "model", "chunks"}` (`model` is the store's text model), where each item in `chunks` contains `chunk_id`, `text`, `embedding`, `embedding_retrieve` (when `retrieve` is active), `token_count`, `source`, `emotion_primary` and `emotion_secondary`.
 
 > **Note:** An `image_base64` chunk stores a SigLIP vector, whereas text chunks use the session's text model (`embeddinggemma-2` or `gtr-t5-base`). Use `POST /image/embed` and `POST /embed` (`model=siglip-base-patch16-224`) for direct text-to-image comparison.
 
@@ -211,6 +213,7 @@ Same for `/sessions/:id/search` and `/temp/:name/search`:
 | `q` | required | Search query text |
 | `n` (alias `limit`) | `5` | Number of results to return |
 | `role` | `organize` | `organize` (768d local session model: `embeddinggemma-2` or `gtr-t5-base`) or `retrieve` (1536d OpenAI) |
+| `model` | — | Optional check: the text model you expect the store to hold. The query is always embedded with the store's model; a different value returns `400` |
 | `openai_api_key` | — | Per-request OpenAI key for `retrieve` (sessions only) |
 | `time_weight` | `0.0` | Blend semantic score with recency (`0.0`–`1.0`) |
 | `decay_halflife_hours` | `168` | Recency decay half-life in hours (default 1 week) |
@@ -219,7 +222,7 @@ Same for `/sessions/:id/search` and `/temp/:name/search`:
 | `agent_id` | — | Agent ID for encrypted search (rotates query vector with agent's key) |
 | `hybrid` | `false` | Fuse dense vector and BM25 lexical rankings (Reciprocal Rank Fusion) |
 | `lexical_only` | `false` | BM25 lexical search only, no query embedding |
-| `guardrail` | `true` | Reject queries containing blocked guardrail phrases (`400 Bad Request`) |
+| `guardrail` | `true` | Reject queries containing blocked guardrail phrases (`403 Forbidden`) |
 
 The response is `{"query", "results", "time_ms"}`, where each result has `chunk_id`, `score`, `text`, `source`, `metadata`, `created_at`, and optional `emotion_primary`, `emotion_secondary`, `nearby_chunks`.
 
@@ -227,7 +230,7 @@ The response is `{"query", "results", "time_ms"}`, where each result has `chunk_
 
 ## Inversion (`POST /invert`)
 
-`POST /invert` takes `{"embedding": [...768 floats], "max_length": 64}` and returns `{"text", "similarity"}`, where `similarity` is the cosine between your vector and the `gtr-t5-base` embedding of `text`. `max_length` (default `64`) bounds the decoded tokens.
+`POST /invert` takes `{"embedding": [...768 floats], "max_length": 64, "model": "gtr-t5-base"}` (`model` optional; any value other than `gtr-t5-base` returns `400`, so pass the model your vector came from to catch mistakes) and returns `{"text", "similarity"}`, where `similarity` is the cosine between your vector and the `gtr-t5-base` embedding of `text`. `max_length` (default `64`) bounds the decoded tokens.
 
 > **Important:** The inverter is trained on **`gtr-t5-base` vectors only**. If you want to invert vectors from a session or `/embed`, pass `"model": "gtr-t5-base"` when ingesting or embedding. EmbeddingGemma 2, SigLIP or OpenAI vectors cannot be inverted by `/invert`.
 

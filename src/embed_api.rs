@@ -3,17 +3,17 @@
 //! Kept free of the `ml` feature so validation is unit-testable without ONNX.
 //! The handler itself lives in `api.rs`. Three models are served:
 //!
-//! - [`EMBED_MODEL`] (GTR-T5-base, the default): the same vector the ingest
-//!   paths store in `Chunk::embedding`.
+//! - [`EMBEDDINGGEMMA2_MODEL`] (the default): EmbeddingGemma 2's text path.
+//!   Takes an optional `task` (the prefix the model was trained with) and
+//!   `dimensions` (Matryoshka truncation to 128/256/512/768).
+//! - [`EMBED_MODEL`] (GTR-T5-base): selectable; the only space `/invert`
+//!   reconstructs.
 //! - [`SIGLIP_TEXT_MODEL`]: the SigLIP text tower, which lives in the same
 //!   space as `POST /image/embed` so text and images can be compared.
-//! - [`EMBEDDINGGEMMA2_MODEL`]: EmbeddingGemma 2's text path. Takes an
-//!   optional `task` (the prefix the model was trained with) and `dimensions`
-//!   (Matryoshka truncation to 128/256/512/768).
 
 use serde::{Deserialize, Serialize};
 
-/// Default text model: GTR-T5-base.
+/// GTR-T5-base: always loaded, selectable by name, required by `/invert`.
 pub const EMBED_MODEL: &str = "gtr-t5-base";
 /// Output dimension of [`EMBED_MODEL`].
 pub const EMBED_DIM: usize = 768;
@@ -101,9 +101,9 @@ impl EmbedModel {
     /// Resolve the optional `model` field. `None`/empty means the default.
     pub fn resolve(name: Option<&str>) -> Result<Self, String> {
         match name.map(str::trim) {
-            None | Some("") | Some(EMBED_MODEL) => Ok(Self::GtrT5Base),
+            None | Some("") | Some(EMBEDDINGGEMMA2_MODEL) => Ok(Self::EmbeddingGemma2),
+            Some(EMBED_MODEL) => Ok(Self::GtrT5Base),
             Some(SIGLIP_TEXT_MODEL) => Ok(Self::SiglipText),
-            Some(EMBEDDINGGEMMA2_MODEL) => Ok(Self::EmbeddingGemma2),
             Some(other) => Err(format!(
                 "unsupported model {other:?}; this endpoint serves {EMBED_MODEL:?}, {SIGLIP_TEXT_MODEL:?} and {EMBEDDINGGEMMA2_MODEL:?}"
             )),
@@ -236,7 +236,7 @@ mod tests {
     fn accepts_default_and_explicit_model() {
         assert_eq!(
             validate(&req(vec!["hello"], None)).unwrap().model,
-            EmbedModel::GtrT5Base
+            EmbedModel::EmbeddingGemma2
         );
         assert_eq!(
             validate(&req(vec!["a", "b"], Some("gtr-t5-base"))).unwrap().model,
@@ -244,7 +244,7 @@ mod tests {
         );
         assert_eq!(
             validate(&req(vec!["x"], Some(""))).unwrap().model,
-            EmbedModel::GtrT5Base
+            EmbedModel::EmbeddingGemma2
         );
     }
 
@@ -293,9 +293,13 @@ mod tests {
 
     #[test]
     fn task_and_dimensions_rejected_for_other_models() {
-        let mut r = req(vec!["hello"], None);
+        let mut r = req(vec!["hello"], Some(EMBED_MODEL));
         r.task = Some("query".into());
         assert!(validate(&r).unwrap_err().contains("task"));
+        // The default model (EmbeddingGemma 2) takes a task.
+        let mut r = req(vec!["hello"], None);
+        r.task = Some("query".into());
+        assert!(validate(&r).is_ok());
         let mut r = req(vec!["hello"], Some(SIGLIP_TEXT_MODEL));
         r.dimensions = Some(256);
         assert!(validate(&r).unwrap_err().contains("dimensions"));

@@ -344,3 +344,47 @@ fn store_total_chunks_across_sessions() {
     let sessions = store.list_sessions(None).unwrap();
     assert_eq!(sessions.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Per-store text model
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_model_is_fixed_on_first_claim() {
+    let store = Store::new();
+    assert_eq!(store.session_model("s"), None);
+
+    store.claim_model("s", "embeddinggemma-2", None).unwrap();
+    assert_eq!(store.session_model("s").as_deref(), Some("embeddinggemma-2"));
+    // Same model again is fine; another model is refused.
+    store.claim_model("s", "embeddinggemma-2", None).unwrap();
+    let err = store.claim_model("s", "gtr-t5-base", None).unwrap_err();
+    assert_eq!(err.store_model, "embeddinggemma-2");
+    assert_eq!(err.requested, "gtr-t5-base");
+
+    store.add_chunks("s", vec![make_chunk("c1", vec![1.0, 0.0])], None).unwrap();
+    let meta = store.get_session_meta("s").unwrap().unwrap();
+    assert_eq!(meta.model, "embeddinggemma-2");
+    assert_eq!(meta.chunk_count, 1);
+}
+
+#[test]
+fn session_without_claim_takes_first_claimed_model() {
+    // Sessions created by add_chunks alone (no model yet) accept the first claim.
+    let store = Store::new();
+    store.add_chunks("legacy", vec![make_chunk("c1", vec![1.0, 0.0])], None).unwrap();
+    assert_eq!(store.session_model("legacy"), None);
+    store.claim_model("legacy", "gtr-t5-base", None).unwrap();
+    assert_eq!(store.session_model("legacy").as_deref(), Some("gtr-t5-base"));
+}
+
+#[test]
+fn temp_store_model_is_fixed_on_first_claim() {
+    let ts = TempStore::new();
+    assert_eq!(ts.store_model("t"), None);
+    ts.claim_model("t", "gtr-t5-base").unwrap();
+    assert!(ts.claim_model("t", "embeddinggemma-2").is_err());
+    ts.add_chunks("t", vec![make_chunk("c1", vec![1.0, 0.0])]).unwrap();
+    let meta = ts.list_stores();
+    assert_eq!(meta[0].model, "gtr-t5-base");
+}
