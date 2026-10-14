@@ -94,6 +94,10 @@ With the tag's CI (gateway and `-cpu` images), that publishes all four images. I
 `deepbluedynamics` and `gcloud auth configure-docker`. `SKIP_PUBLISH=1 bash deploy.sh` stops after step 2. If the gateway
 isn't on Docker Hub yet, the script stops at step 4 and prints the two commands to finish by hand.
 
+On Windows, run it with Git Bash (`& "C:\Program Files\Git\bin\bash.exe" deploy.sh` from PowerShell). Plain `bash` in
+PowerShell starts WSL, which usually has no `docker`; the script checks for `gcloud` and `docker` before building and
+stops with a message if either is missing.
+
 ---
 
 ## Deploy

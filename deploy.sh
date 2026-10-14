@@ -17,6 +17,17 @@ VERSION="$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -1)"
 TAG="v${VERSION}"
 echo "==> Releasing ${SERVICE} ${TAG}"
 
+# Check the tools before the 25-minute build, not after it. On Windows, plain
+# `bash` from PowerShell is WSL, which usually has no docker; use Git Bash.
+NEEDED="gcloud"
+[[ "${SKIP_PUBLISH:-}" == "1" ]] || NEEDED="gcloud docker"
+for tool in ${NEEDED}; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    echo "==> ${tool} not found in this shell. On Windows, run: & \"C:\\Program Files\\Git\\bin\\bash.exe\" deploy.sh" >&2
+    exit 1
+  fi
+done
+
 # Rebuild models image only when needed (export script or pip deps changed).
 # Normal code deploys skip this — models are already baked into shivvr-models:latest.
 if [[ "$1" == "--rebuild-models" ]]; then
