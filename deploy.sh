@@ -29,7 +29,7 @@ echo "==> Building and pushing app image via Cloud Build..."
 gcloud builds submit \
   --tag "${IMAGE}:${TAG}" \
   --project "${PROJECT_ID}" \
-  --timeout 20m \
+  --timeout 40m \
   .
 
 gcloud container images add-tag -q "${IMAGE}:${TAG}" "${IMAGE}:latest" --project "${PROJECT_ID}"

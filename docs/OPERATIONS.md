@@ -114,7 +114,7 @@ What it does:
    | `siglip-vision.onnx` | SigLIP base patch16-224, vision tower | `POST /image/embed` and `image_base64` ingest |
    | `siglip-text.onnx`, `siglip-tokenizer.json` | SigLIP base patch16-224, text tower | `POST /embed` with `model=siglip-base-patch16-224` |
 
-2. `gcloud builds submit --tag gcr.io/gnosis-459403/shivvr:v<version> --timeout 20m` compiles Rust with CUDA and copies `/models` from `shivvr-models:latest`. Cloud Build never uploads the gitignored `models/` directory, which is why the app image copies from the prebuilt models image. About 17 minutes. The image is then also tagged `:latest`.
+2. `gcloud builds submit --tag gcr.io/gnosis-459403/shivvr:v<version> --timeout 40m` compiles Rust with CUDA and copies `/models` from `shivvr-models:latest`. Cloud Build never uploads the gitignored `models/` directory, which is why the app image copies from the prebuilt models image. About 17 minutes before v0.6.0; the v0.6.0 build ran past 20 minutes (lume is now fetched and compiled from git), so the limit is 40. The image is then also tagged `:latest`.
 3. `gcloud run deploy shivvr --image ...:v<version>` creates the new revision with `NUTS_AUTH_JWKS_URL` and `NUTS_AUTH_VALIDATE_URL` set and routes 100% of traffic.
 
 The gateway (`shivvr-landing`, the public `shivvr.nuts.services` front door) is deployed separately using the image built by `.github/workflows/release.yml`:
