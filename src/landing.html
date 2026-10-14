@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>shivvr — semantic embedding & cognitive agent service</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0a'/%3E%3Cpath d='M10 11 Q16 8 22 11 Q16 14 10 17 Q16 20 22 23' stroke='%2300c2a8' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<meta name="description" content="Ephemeral semantic embedding & cognitive agent service. Chunk text, embed with GTR-T5-base (768d), search with hybrid BM25 + FST routers, and run autonomous tool reasoning loops.">
+<meta name="description" content="Ephemeral semantic embedding & cognitive agent service. Chunk text, embed text, images and voice with Gemma 4 embeddings (EmbeddingGemma 2) or GTR-T5-base, search with hybrid BM25 + FST routers, and run an agent with tool reasoning loops.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://shivvr.nuts.services">
 <meta property="og:title" content="shivvr — semantic embedding & cognitive agent service">
@@ -141,7 +141,7 @@
   <h1>shivvr 🔪 <span class="ver">v{{VERSION}}</span></h1>
   <p class="sub">Ephemeral semantic embedding & cognitive agent service.</p>
   <p class="desc">
-    Chunk text. Embed it with EmbeddingGemma 2 (the default) while a GTR-T5-base vector is kept alongside every chunk, so anything stored can be inverted back to text. Images embed with SigLIP until EmbeddingGemma 2's own vision path lands. Search via hybrid FST-BM25 vector rank fusion. Stream turn-based cognitive agent reasoning via native Model Context Protocol (MCP).
+    Chunk text. Embed text, images and voice with Gemma 4 embeddings (EmbeddingGemma 2) by default, with GTR-T5-base as an option. Search via hybrid FST-BM25 vector rank fusion. Run an agent that streams turn-based reasoning over native Model Context Protocol (MCP).
   </p>
   <div class="ctas">
     <a class="cta" href="#api">View API</a>
@@ -153,12 +153,12 @@
 
 <!-- Stats -->
 <div class="stats">
-  <div class="stat"><div class="val">On-demand</div><div class="lbl">Uptime</div></div>
-  <div class="stat"><div class="val">CUDA</div><div class="lbl">Compute</div></div>
-  <div class="stat"><div class="val">Ephemeral</div><div class="lbl">Sessions</div></div>
-  <div class="stat"><div class="val">Ephemeral</div><div class="lbl">Chunks</div></div>
-  <div class="stat"><div class="val">&#x2713;</div><div class="lbl">Encryption</div></div>
-  <div class="stat"><div class="val">Optional</div><div class="lbl">Inversion</div></div>
+  <div class="stat"><div class="val" id="s-uptime">On-demand</div><div class="lbl">Uptime</div></div>
+  <div class="stat"><div class="val" id="s-gpu">CUDA</div><div class="lbl">Compute</div></div>
+  <div class="stat"><div class="val" id="s-sessions">Ephemeral</div><div class="lbl">Sessions</div></div>
+  <div class="stat"><div class="val" id="s-chunks">Ephemeral</div><div class="lbl">Chunks</div></div>
+  <div class="stat"><div class="val" id="s-enc">&#x2713;</div><div class="lbl">Encryption</div></div>
+  <div class="stat"><div class="val" id="s-inv">Optional</div><div class="lbl">Inversion</div></div>
 </div>
 
 <!-- Capabilities -->
@@ -178,7 +178,7 @@
   </div>
   <div class="feature">
     <div class="name">Cognitive GhostAgent</div>
-    <p>Turn-based agent loop with integrated memory search, document ingestion, session indexing, and sandboxed command execution. Powered by OpenAI/Anthropic.</p>
+    <p>Turn-based agent loop that streams each turn over SSE. Its tools: search memory and ingest documents with the session's own embedding model (Gemma 4 embeddings by default, GTR-T5-base if the session chose it), list sessions, and run sandboxed commands. Powered by OpenAI or Anthropic; pick the model with <code>OPENAI_MODEL</code> or <code>ANTHROPIC_MODEL</code>.</p>
   </div>
   <div class="feature">
     <div class="name">Native MCP Server</div>
@@ -255,6 +255,24 @@ curl -X POST https://shivvr.nuts.services/embed \
   -H "Content-Type: application/json" \
   -d '{"texts": ["Who protects the Supreme Raven?"], "model": "embeddinggemma-2", "task": "query", "dimensions": 256}'
 
+<span class="cm"># Upload an image: base64 the file into a JSON body, then ingest it (stored as an [image] chunk, searchable by text)</span>
+printf '{"image_base64": "%s", "text": "boat at the fuel dock"}' "$(base64 -w0 photo.jpg)" &gt; image.json
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
+  -H "Content-Type: application/json" --data @image.json
+
+<span class="cm"># Or just get the image vector back (768d), nothing stored</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/image/embed \
+  -H "Content-Type: application/json" --data @image.json
+
+<span class="cm"># Upload a voice file (WAV): it is transcribed, then the transcript is chunked and embedded</span>
+printf '{"audio_base64": "%s"}' "$(base64 -w0 note.wav)" &gt; voice.json
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/sessions/my-session/ingest \
+  -H "Content-Type: application/json" --data @voice.json
+
+<span class="cm"># Or get the transcript and its vector back, nothing stored</span>
+curl -H "Authorization: Bearer &lt;nuts-auth-token&gt;" -X POST https://shivvr.nuts.services/audio/embed \
+  -H "Content-Type: application/json" --data @voice.json
+
 <span class="cm"># Synchronize Claude Code or Antigravity with shivvr's Native MCP Server</span>
 nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 </code></pre>
@@ -283,7 +301,9 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 <div class="tbl-wrap">
 <table>
   <tr><th>Field</th><th>Default</th><th>Description</th></tr>
-  <tr><td><code>text</code></td><td>required</td><td>Text to chunk and embed</td></tr>
+  <tr><td><code>text</code></td><td>—</td><td>Text to chunk and embed. Send <code>text</code>, <code>audio_base64</code>, <code>image_base64</code> or any mix</td></tr>
+  <tr><td><code>audio_base64</code></td><td>—</td><td>A base64 WAV voice file. It is transcribed, the transcript is added to <code>text</code>, and chunks get <code>source: "audio"</code>. Needs the transcription service (<code>TRANSCRIPTION_URL</code>; <code>/health</code> shows <code>audio_available</code>)</td></tr>
+  <tr><td><code>image_base64</code></td><td>—</td><td>A base64 JPEG or PNG. Stored as one <code>[image]</code> chunk (plus any <code>text</code> as its caption) with <code>source: "image"</code></td></tr>
   <tr><td><code>model</code></td><td>embeddinggemma-2</td><td>The store's text model: <code>embeddinggemma-2</code> or <code>gtr-t5-base</code>. Set on the first ingest; later ingests use the store's model, and naming a different one is a 400</td></tr>
   <tr><td><code>return_vectors</code></td><td>none</td><td><code>["gtr-t5-base"]</code> returns each chunk's GTR vector under <code>embeddings</code>, ready for <code>/invert</code></td></tr>
   <tr><td><code>source</code>, <code>metadata</code></td><td>—</td><td>Stored on every chunk</td></tr>
@@ -303,6 +323,18 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 </table>
 </div>
 <p class="hint">Response: <code>{"model", "dim", "vectors"}</code>, unit-length vectors. Use <code>task=query</code> for search queries and <code>task=document</code> for the passages they search.</p>
+
+<!-- Image and voice requests -->
+<h2>Image and voice requests</h2>
+<div class="tbl-wrap">
+<table>
+  <tr><th>Route</th><th>Body</th><th>Response</th></tr>
+  <tr><td><code>POST /image/embed</code></td><td><code>{"image_base64": "..."}</code> (JPEG or PNG)</td><td><code>{"embedding", "dimension", "model"}</code>, 768d, in the same space as <code>/embed</code> with <code>model: siglip-base-patch16-224</code>, so a text query can find the image</td></tr>
+  <tr><td><code>POST /audio/embed</code></td><td><code>{"audio_base64": "...", "model": "embeddinggemma-2"}</code> (WAV; <code>model</code> optional, or <code>gtr-t5-base</code>)</td><td><code>{"transcript", "embedding", "dimension", "model"}</code></td></tr>
+  <tr><td><code>POST /audio/transcribe</code></td><td><code>{"audio_base64": "..."}</code> (WAV)</td><td><code>{"transcript"}</code></td></tr>
+</table>
+</div>
+<p class="hint">Bodies up to 32 MiB, so about 24 MB of file after base64. Build the JSON in a file and send it with <code>--data @file.json</code>; a large base64 string is too long for a command-line argument.</p>
 
 <!-- Environment -->
 <h2>Environment</h2>
@@ -408,6 +440,28 @@ docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v shivvr-models:/models:ro d
 .nuts-footer-right a:hover { color:#e8a020; border-bottom-color:rgba(232,160,32,.55); }
 @media(max-width:560px) { .nuts-footer-inner { justify-content:center; text-align:center; } }
 </style>
+
+<script>
+// Served by the backend, /health has live stats; served by the gateway it
+// doesn't, and the labels above stay as they are.
+(function() {
+  function fmt(n) {
+    if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+    return String(n);
+  }
+  function set(id, text) { var el = document.getElementById(id); if (el) el.textContent = text; }
+  fetch('/health').then(function(r) { return r.json(); }).then(function(d) {
+    if (typeof d.uptime_seconds !== 'number') return;
+    set('s-uptime', fmt(d.uptime_seconds) + 's');
+    set('s-gpu', d.gpu ? 'CUDA' : 'CPU');
+    set('s-sessions', fmt(d.sessions || 0));
+    set('s-chunks', fmt(d.total_chunks || 0));
+    set('s-enc', d.encryption_available ? '✓' : '✕');
+    set('s-inv', d.inversion_available ? 'on' : 'off');
+  }).catch(function() {});
+})();
+</script>
 
 </body>
 </html>
