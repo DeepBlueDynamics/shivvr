@@ -78,16 +78,21 @@ git commit -am "release: v0.5.3"
 git tag -a v0.5.3 -m "shivvr v0.5.3"
 git push origin main v0.5.3          # triggers release.yml (gateway + multi-arch -cpu on GHCR & Docker Hub)
 
-# 2. build + deploy the CUDA app image (Cloud Build -> GCR -> Cloud Run)
-bash deploy.sh                       # pushes gcr.io/gnosis-459403/shivvr:v0.5.3 and :latest, deploys it
-
-# 3. copy the CUDA image from GCR to Docker Hub (no local 4.4 GB pull needed)
-docker buildx imagetools create \
-  -t deepbluedynamics/shivvr:0.5.3 \
-  -t deepbluedynamics/shivvr:v0.5.3 \
-  -t deepbluedynamics/shivvr:latest \
-  gcr.io/gnosis-459403/shivvr:v0.5.3
+# 2. when the tag's workflow has finished: build + deploy + publish the rest
+bash deploy.sh
 ```
+
+`deploy.sh` then:
+1. builds the CUDA app image on Cloud Build and pushes `gcr.io/gnosis-459403/shivvr:v0.5.3` and `:latest`;
+2. deploys it to Cloud Run `shivvr`;
+3. copies it to Docker Hub as `deepbluedynamics/shivvr:0.5.3`, `v0.5.3` and `latest` (registry to registry,
+   about 10 minutes for 4.4 GB);
+4. copies the gateway that CI published (`deepbluedynamics/shivvr-gateway:0.5.3`) into GCR;
+5. deploys it to Cloud Run `shivvr-landing` (shivvr.nuts.services).
+
+With the tag's CI (gateway and `-cpu` images), that publishes all four images. It needs `docker login` to Docker Hub as
+`deepbluedynamics` and `gcloud auth configure-docker`. `SKIP_PUBLISH=1 bash deploy.sh` stops after step 2. If the gateway
+isn't on Docker Hub yet, the script stops at step 4 and prints the two commands to finish by hand.
 
 ---
 
