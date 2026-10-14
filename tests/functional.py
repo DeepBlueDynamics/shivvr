@@ -191,6 +191,22 @@ status, r = req("GET", f"/sessions/{model_session}/search?q=harbor&model={other}
 check("search expecting another model -> 400", status == 400, f"status={status}")
 status, r = req("POST", "/invert", {"embedding": [0.0] * 768, "model": "embeddinggemma-2"})
 check("/invert rejects non-GTR model -> 400", status == 400, f"status={status}")
+
+# GTR runs alongside: the GTR vector comes back only when requested.
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "A ketch rounded the point at noon."})
+check("no return_vectors -> no embeddings map", status == 200 and "embeddings" not in r["chunks"][0],
+      f"keys={list(r['chunks'][0].keys()) if status == 200 else status}")
+status, r = req("POST", f"/sessions/{model_session}/ingest",
+                {"text": "A ketch rounded the point at noon.", "return_vectors": ["gtr-t5-base"]})
+gtr_vec = (r.get("chunks") or [{}])[0].get("embeddings", {}).get("gtr-t5-base") if status == 200 else None
+check("return_vectors gtr-t5-base -> 768d GTR vector", gtr_vec is not None and len(gtr_vec) == 768,
+      f"status={status}")
+if gtr_vec and inversion_up:
+    status, inv = req("POST", "/invert", {"embedding": gtr_vec, "model": "gtr-t5-base", "max_length": 32})
+    check("GTR vector from a default-model session inverts", status == 200 and inv.get("similarity", 0) > 0.5,
+          f"status={status} similarity={inv.get('similarity')}")
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "x.", "return_vectors": ["siglip"]})
+check("unknown return_vectors entry -> 400", status == 400, f"status={status}")
 req("DELETE", f"/sessions/{model_session}")
 
 # ── 7. EmbeddingGemma 2 (/embed) ──────────────────────────────────────────────

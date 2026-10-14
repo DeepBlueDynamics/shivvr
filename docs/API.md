@@ -165,6 +165,7 @@ Request fields:
 |-------|------|-------------|
 | `text` | string | Text to chunk and embed (768d) |
 | `model` | string (optional) | `embeddinggemma-2` (default; applies the `document` prefix on ingest and `query` prefix on search automatically) or `gtr-t5-base` (required if you plan to call `/invert` on this session's vectors). Chosen on the first ingest for a session/temp store and locked for subsequent ingests |
+| `return_vectors` | array (optional) | Extra vectors to return per chunk, by model name. Today only `["gtr-t5-base"]`: every text chunk also keeps a GTR-T5-base vector alongside its search vector, so chunks stay invertible with `/invert` whatever the store's model. Returned under `embeddings` |
 | `source` | string (optional) | Source identifier stored on every chunk |
 | `metadata` | JSON (optional) | Arbitrary JSON metadata attached to every chunk |
 | `emotion_primary` | string (optional) | Primary emotion tag (`vedanā`) |
@@ -177,7 +178,7 @@ Request fields:
 
 Omit `model` on later ingests to use the store's model. Naming a different model than the store holds returns `400`; use a new session for another model. Chunk boundaries and `token_count` come from the GTR tokenizer whichever model embeds the chunks.
 
-The response is `{"chunks_created", "tokens_processed", "time_ms", "model", "chunks"}` (`model` is the store's text model), where each item in `chunks` contains `chunk_id`, `text`, `embedding`, `embedding_retrieve` (when `retrieve` is active), `token_count`, `source`, `emotion_primary` and `emotion_secondary`.
+The response is `{"chunks_created", "tokens_processed", "time_ms", "model", "chunks"}` (`model` is the store's text model), where each item in `chunks` contains `chunk_id`, `text`, `embedding` (the store's search vector), `embedding_retrieve` (when `retrieve` is active), `embeddings` (only when `return_vectors` is set, e.g. `{"gtr-t5-base": [...768]}`; image chunks have none), `token_count`, `source`, `emotion_primary` and `emotion_secondary`.
 
 > **Note:** An `image_base64` chunk stores a SigLIP vector, whereas text chunks use the session's text model (`embeddinggemma-2` or `gtr-t5-base`). Use `POST /image/embed` and `POST /embed` (`model=siglip-base-patch16-224`) for direct text-to-image comparison.
 
@@ -232,7 +233,7 @@ The response is `{"query", "results", "time_ms"}`, where each result has `chunk_
 
 `POST /invert` takes `{"embedding": [...768 floats], "max_length": 64, "model": "gtr-t5-base"}` (`model` optional; any value other than `gtr-t5-base` returns `400`, so pass the model your vector came from to catch mistakes) and returns `{"text", "similarity"}`, where `similarity` is the cosine between your vector and the `gtr-t5-base` embedding of `text`. `max_length` (default `64`) bounds the decoded tokens.
 
-> **Important:** The inverter is trained on **`gtr-t5-base` vectors only**. If you want to invert vectors from a session or `/embed`, pass `"model": "gtr-t5-base"` when ingesting or embedding. EmbeddingGemma 2, SigLIP or OpenAI vectors cannot be inverted by `/invert`.
+> **Important:** The inverter is trained on **`gtr-t5-base` vectors only**. Every text chunk keeps a GTR vector alongside its search vector, so for any session ingest with `"return_vectors": ["gtr-t5-base"]` and invert `embeddings["gtr-t5-base"]`. For new text, use `/embed` with `"model": "gtr-t5-base"`. EmbeddingGemma 2, SigLIP or OpenAI vectors cannot be inverted by `/invert`.
 
 Inversion is **approximate, not lossless**. Embedding is many-to-one — many different sentences map to nearly the same 768d vector — so a single `/invert` call returns text that is *semantically close* to the source but rarely the exact same words. Invert the embedding of `"Rust is a systems programming language"` and you might get back `"the Rust language is used for systems programming"`: same meaning, different tokens.
 

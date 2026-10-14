@@ -35,6 +35,36 @@ benchmark (lume's numbers, not measured in shivvr), with identical rankings. Lat
 modes (RRF k=60, normalized-v2) from `hybrid::blend_hybrid_scores_with_mode`. Not worth it for
 ephemeral sessions: spelling, semantic mesh, graph boost.
 
+**GTR runs alongside (0.6.0, agreed with lume 2026-10-14):** every text chunk keeps two vectors,
+the store's search vector (`embedding`, EmbeddingGemma 2 by default) and the GTR-T5-base vector the
+chunker already computes (no extra inference). So `/invert` works for chunks in every session, not just
+GTR sessions. The GTR vector is returned only on request, using a generic shape that leaves room for
+more models:
+- Ingest request: `"return_vectors": ["gtr-t5-base"]` (an unknown name is a 400).
+- Response, per chunk: `"embeddings": {"gtr-t5-base": [...768]}`. Absent unless requested. Image
+  chunks have no GTR vector.
+- `embedding` stays the store's search vector, unchanged. Search results return no vectors.
+- `/embed` keeps returning `model`; `/invert` keeps the `{embedding, max_length}` form.
+- Invert-by-reference (`{session_id, chunk_id}`) was considered and dropped: callers that invert want
+  the vector on the wire anyway.
+
+**Inverter for EmbeddingGemma 2's space (research, after 0.6.0):** Gemma puts text, images, audio
+and video in one space, so a vec2text-style inverter trained on Gemma vectors could turn image and
+audio vectors into text (rough captions/transcripts) as well as text.
+1. Text pilot on a local RTX 3060: ~100k (text, Gemma `document` vector) pairs, hypothesis model only.
+   Measure re-embed cosine and BLEU on held-out text. Go/no-go for step 3.
+2. Zero-shot modality check: invert COCO-style image vectors and audio vectors with the pilot model to
+   size the modality gap.
+3. Full run on a spot A100 (~3–5 days, ~$100–200, estimate): text + caption + transcript pairs, then
+   the corrector. Needs Kord's OK for the spend.
+4. Serve it as a second inverter; `/invert` picks the inverter by the vector's model.
+Data: MS MARCO as for GTR, plus public marine text (lume's `docs/cruiser_library.csv`, ~472 public
+references). Never boat logbooks or telemetry: private owner data that needs explicit consent.
+Lume has no current use for it (a possible future one is camera stills and VHF/engine audio on board),
+so don't size it around lume. `training/` stays the home; first fix its 384d hard-coding and make the
+corrector re-embed with the target model. Retrieval check: `lume eval` on `docs/monte_cristo`
+(Hit@k/MRR/nDCG) to confirm Gemma doesn't rank worse than GTR on that corpus.
+
 **Lume compatibility:** lume's scratch-ingest → `/invert` path must send GTR. Lume will switch it to
 `POST /embed {"model":"gtr-t5-base"}` (works on 0.5.x). Its temp-store search is covered by per-store
 pinning plus server-side prefixes. Don't release 0.6.0 until Kord confirms the lume change.

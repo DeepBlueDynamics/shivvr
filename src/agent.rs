@@ -298,7 +298,7 @@ impl GhostAgent {
                         if model != crate::embed_api::EMBED_MODEL {
                             for chunk in chunks.iter_mut() {
                                 match self.text_models.embed(model, Purpose::Document, &chunk.text) {
-                                    Ok(v) => chunk.embedding = v,
+                                    Ok(v) => chunk.embedding_gtr = Some(std::mem::replace(&mut chunk.embedding, v)),
                                     Err(e) => return format!("Error embedding chunk: {}", e),
                                 }
                             }

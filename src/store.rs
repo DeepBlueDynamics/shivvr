@@ -15,6 +15,11 @@ pub struct Chunk {
     /// Retrieve embedding (1536d, ada-002) — optional
     #[serde(default)]
     pub embedding_retrieve: Option<Vec<f32>>,
+    /// GTR-T5-base vector (768d) kept alongside `embedding` when the session
+    /// uses another text model, so the chunk stays invertible. `None` for GTR
+    /// sessions (where `embedding` is already GTR) and image chunks.
+    #[serde(default)]
+    pub embedding_gtr: Option<Vec<f32>>,
     pub token_count: usize,
     pub source: Option<String>,
     pub metadata: serde_json::Value,
@@ -469,6 +474,7 @@ mod tests {
             text: format!("text for {}", id),
             embedding,
             embedding_retrieve: retrieve,
+            embedding_gtr: None,
             token_count: 10,
             source: Some("test".to_string()),
             metadata: serde_json::json!({}),
@@ -498,6 +504,7 @@ mod tests {
             text: "hello world".to_string(),
             embedding: vec![0.1, 0.2, 0.3],
             embedding_retrieve: Some(vec![0.4, 0.5, 0.6, 0.7]),
+            embedding_gtr: None,
             token_count: 2,
             source: Some("test".to_string()),
             metadata: serde_json::json!({"key": "value"}),

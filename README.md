@@ -104,7 +104,7 @@ Full endpoint schemas, parameters, and examples are in [**docs/API.md**](docs/AP
 Named ephemeral stores with an automatic 2-hour TTL (`/temp`, `/temp/:name/ingest`, `/temp/:name/search`, `/temp/:name/dump`, `DELETE /temp/:name`). Like sessions, a temp store locks in its embedding model on first ingest. See [docs/API.md#temp-store](docs/API.md#temp-store).
 
 ### Inversion (`/invert`)
-`POST /invert` reconstructs approximate text from a 768d **`gtr-t5-base`** vector and returns `{"text", "similarity"}`. Use `"model": "gtr-t5-base"` when creating a session or calling `/embed` if you need `/invert`. See [docs/API.md#inversion-post-invert](docs/API.md#inversion-post-invert).
+`POST /invert` reconstructs approximate text from a 768d **`gtr-t5-base`** vector and returns `{"text", "similarity"}`. GTR runs alongside the default model: every text chunk keeps a GTR vector, returned when you ingest with `"return_vectors": ["gtr-t5-base"]`. For new text, call `/embed` with `"model": "gtr-t5-base"`. See [docs/API.md#inversion-post-invert](docs/API.md#inversion-post-invert).
 
 ### Encryption (`/agent/:id/*`)
 Register a per-agent orthogonal rotation matrix (`POST /agent/:id/register`) to encrypt chunk embeddings at ingest and query vectors at search time, or call `/agent/:id/encrypt` and `/agent/:id/decrypt` directly. See [docs/API.md#per-agent-encryption-agentid](docs/API.md#per-agent-encryption-agentid).

@@ -32,6 +32,7 @@ fn make_chunk(id: &str, embedding: Vec<f32>) -> Chunk {
         text: format!("text for {}", id),
         embedding,
         embedding_retrieve: None,
+        embedding_gtr: None,
         token_count: 10,
         source: Some("integration-test".to_string()),
         metadata: serde_json::json!({}),

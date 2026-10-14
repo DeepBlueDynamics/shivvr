@@ -79,6 +79,11 @@ pub struct IngestRequest {
     /// ingests to use the store's model.
     #[serde(default)]
     pub model: Option<String>,
+    /// Extra vectors to return per chunk, by model name. Today only
+    /// `"gtr-t5-base"` (the invertible vector kept alongside the search
+    /// vector). Returned under each chunk's `embeddings` map.
+    #[serde(default)]
+    pub return_vectors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +103,9 @@ pub struct IngestChunk {
     pub embedding: Vec<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_retrieve: Option<Vec<f32>>,
+    /// Vectors requested with `return_vectors`, keyed by model name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embeddings: Option<std::collections::HashMap<String, Vec<f32>>>,
     pub token_count: usize,
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,7 +375,8 @@ fn search_model(state: &AppState, expected: Option<&str>, existing: Option<Strin
 }
 
 /// Re-embed chunk texts with `model` (`document` prefix). The chunker already
-/// embedded them with GTR-T5-base, so GTR needs no second pass.
+/// embedded them with GTR-T5-base, so GTR needs no second pass; for any other
+/// model the GTR vector moves to `embedding_gtr` so the chunk stays invertible.
 async fn embed_chunks(state: &AppState, model: &'static str, chunks: &mut [crate::store::Chunk]) -> Result<(), ApiError> {
     if model == crate::embed_api::EMBED_MODEL || chunks.is_empty() {
         return Ok(());
@@ -384,9 +393,49 @@ async fn embed_chunks(state: &AppState, model: &'static str, chunks: &mut [crate
     .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding task failed: {e}")))?
     .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Embedding failed: {e}")))?;
     for (chunk, vector) in chunks.iter_mut().zip(vectors) {
-        chunk.embedding = vector;
+        chunk.embedding_gtr = Some(std::mem::replace(&mut chunk.embedding, vector));
     }
     Ok(())
+}
+
+/// Parse an ingest's `return_vectors`. Only `gtr-t5-base` can be requested
+/// today (the store's own vector is always returned as `embedding`).
+fn parse_return_vectors(names: &[String]) -> Result<bool, ApiError> {
+    let mut gtr = false;
+    for name in names {
+        match name.trim() {
+            crate::embed_api::EMBED_MODEL => gtr = true,
+            other => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unsupported return_vectors entry {other:?}; available: [{:?}]",
+                        crate::embed_api::EMBED_MODEL
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(gtr)
+}
+
+/// The `embeddings` map for an ingest response chunk: the GTR vector when
+/// requested (the stored one, or `embedding` itself for GTR stores).
+fn extra_vectors(
+    want_gtr: bool,
+    store_model: &str,
+    embedding: &[f32],
+    embedding_gtr: Option<&Vec<f32>>,
+) -> Option<std::collections::HashMap<String, Vec<f32>>> {
+    if !want_gtr {
+        return None;
+    }
+    let gtr = match embedding_gtr {
+        Some(v) => v.clone(),
+        None if store_model == crate::embed_api::EMBED_MODEL => embedding.to_vec(),
+        None => return None,
+    };
+    Some(std::collections::HashMap::from([(crate::embed_api::EMBED_MODEL.to_string(), gtr)]))
 }
 
 /// Embed a search query with `model` (`query` prefix).
@@ -413,6 +462,7 @@ pub async fn ingest(
     }
     let start = std::time::Instant::now();
     let model = ingest_model(&state, req.model.as_deref(), state.store.session_model(&session_id))?;
+    let want_gtr = parse_return_vectors(&req.return_vectors)?;
 
     let emotion_primary = req.emotion_primary.clone();
     let emotion_secondary = req.emotion_secondary.clone();
@@ -506,6 +556,7 @@ pub async fn ingest(
             text: img_text,
             embedding: img_emb,
             embedding_retrieve: None,
+            embedding_gtr: None,
             token_count: 1,
             source: Some("image".to_string()),
             metadata: req.metadata.clone(),
@@ -553,6 +604,9 @@ pub async fn ingest(
         if let Some(keys) = state.crypto.get_keys(aid) {
             for chunk in &mut chunks {
                 chunk.embedding = keys.encrypt(&chunk.embedding, "organize");
+                if let Some(ref emb) = chunk.embedding_gtr {
+                    chunk.embedding_gtr = Some(keys.encrypt(emb, "organize"));
+                }
                 if let Some(ref emb) = chunk.embedding_retrieve {
                     chunk.embedding_retrieve = Some(keys.encrypt(emb, "retrieve"));
                 }
@@ -571,6 +625,12 @@ pub async fn ingest(
             text: c.text.clone(),
             embedding: c.embedding.clone(),
             embedding_retrieve: c.embedding_retrieve.clone(),
+            // Image chunks hold a SigLIP vector and have no GTR vector.
+            embeddings: if c.id.starts_with("img_") {
+                None
+            } else {
+                extra_vectors(want_gtr, model, &c.embedding, c.embedding_gtr.as_ref())
+            },
             token_count: c.token_count,
             source: c.source.clone(),
             emotion_primary: c.emotion_primary.clone(),
@@ -607,6 +667,7 @@ pub async fn temp_ingest(
 ) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
     let start = std::time::Instant::now();
     let model = ingest_model(&state, req.model.as_deref(), state.temp_store.store_model(&name))?;
+    let want_gtr = parse_return_vectors(&req.return_vectors)?;
 
     let emotion_primary = req.emotion_primary.clone();
     let emotion_secondary = req.emotion_secondary.clone();
@@ -659,6 +720,9 @@ pub async fn temp_ingest(
         if let Some(keys) = state.crypto.get_keys(aid) {
             for chunk in &mut chunks {
                 chunk.embedding = keys.encrypt(&chunk.embedding, "organize");
+                if let Some(ref emb) = chunk.embedding_gtr {
+                    chunk.embedding_gtr = Some(keys.encrypt(emb, "organize"));
+                }
                 if let Some(ref emb) = chunk.embedding_retrieve {
                     chunk.embedding_retrieve = Some(keys.encrypt(emb, "retrieve"));
                 }
@@ -700,11 +764,40 @@ pub async fn temp_ingest(
             None
         };
 
+        // Pooled GTR vector, when requested: mean of each chunk's GTR vector
+        // (the stored one, or `embedding` itself in a GTR store).
+        let pooled_gtr = if want_gtr {
+            let vectors: Vec<&[f32]> = chunks
+                .iter()
+                .filter_map(|c| match &c.embedding_gtr {
+                    Some(v) => Some(v.as_slice()),
+                    None if model == crate::embed_api::EMBED_MODEL => Some(c.embedding.as_slice()),
+                    None => None,
+                })
+                .collect();
+            if vectors.len() == chunks.len() {
+                let mut gp = vec![0.0f32; vectors[0].len()];
+                for v in &vectors {
+                    for (p, x) in gp.iter_mut().zip(v.iter()) {
+                        *p += x;
+                    }
+                }
+                let gnorm = gp.iter().map(|v| v * v).sum::<f32>().sqrt();
+                if gnorm > 0.0 { for p in &mut gp { *p /= gnorm; } }
+                Some(std::collections::HashMap::from([(crate::embed_api::EMBED_MODEL.to_string(), gp)]))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         vec![IngestChunk {
             chunk_id: chunks[0].id.clone(),
             text: req.text.clone(),
             embedding: pooled,
             embedding_retrieve: pooled_retrieve,
+            embeddings: pooled_gtr,
             token_count: tokens_processed,
             source: chunks[0].source.clone(),
             emotion_primary: emotion_primary.clone(),
@@ -718,6 +811,7 @@ pub async fn temp_ingest(
                 text: c.text.clone(),
                 embedding: c.embedding.clone(),
                 embedding_retrieve: c.embedding_retrieve.clone(),
+                embeddings: extra_vectors(want_gtr, model, &c.embedding, c.embedding_gtr.as_ref()),
                 token_count: c.token_count,
                 source: c.source.clone(),
                 emotion_primary: c.emotion_primary.clone(),
