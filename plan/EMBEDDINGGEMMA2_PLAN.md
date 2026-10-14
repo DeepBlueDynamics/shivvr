@@ -1,8 +1,9 @@
 # EmbeddingGemma 2 in shivvr, and training our own embedder
 
-Status as of 2026-10-06. Owner: Kord. Work packages (WP) are sized for one worker each.
+**Technical reference.** Direction, status and sequencing live in [ROADMAP.md](ROADMAP.md); where
+this file and the roadmap disagree, the roadmap wins. Work packages (WP) are sized for one worker each.
 
-## 0. Direction (decided 2026-10-14)
+## 0. Decisions of 2026-10-14 (record; status tracked in ROADMAP.md)
 
 **EmbeddingGemma 2 is the default model; GTR-T5-base stays and can be selected.**
 - `/embed`, session and temp ingest, and search use `embeddinggemma-2` unless the request names
@@ -119,8 +120,8 @@ separate tower output like SigLIP's.
   the `task`/`dimensions` fields. The MCP tools do not expose `/embed`, and there is no
   OpenAI-compatible `/v1/embeddings` route, so neither needed changes.
 **Verified by WP1 (2026-10-07):** export passes both checks, Rust `/embed` matches Python (min cosine
-0.99999988). Docker stage and `deploy.sh --rebuild-models` still not run.
-produced a real vector yet. WP1 is the gate for everything else.
+0.99999988). The Docker stage has since run in Cloud Build and EmbeddingGemma 2 serves in production
+(v0.5.0+).
 
 ## 3. Work packages
 
@@ -219,19 +220,14 @@ Build notes:
   feature extractor to Rust, or fold it into the ONNX graph (STFT is available in opset 17).
 - Input: 16 kHz mono; resample in Rust. ~327 s max per input at 25 tokens/s.
 
-### WP5: Using it for sessions and temp stores (decision needed)
-Ingest stores GTR vectors and every session assumes one 768d space. Options:
-1. Leave ingest on GTR; EmbeddingGemma 2 is `/embed` only. Zero risk. (Current state.)
-2. Per-session embedding model chosen at creation (`model` on create), stored with the session;
-   search, encryption keys (dim² floats) and `/invert` (GTR only) check it.
-3. Store both vectors per chunk. Doubles memory; only worth it if search quality proves it.
+### WP5: Using it for sessions and temp stores — DONE in 0.6.0
+Decided 2026-10-14: per-store model fixed on the first ingest, EmbeddingGemma 2 by default, and the
+GTR vector kept alongside every chunk (options 2 and 3 combined; the GTR vector costs no extra
+inference because the chunker already computes it). See section 0 and ROADMAP M1.
 
-Recommendation: option 2 after WP1/WP2, gated on an in-domain retrieval comparison (section 4.2)
-showing EmbeddingGemma 2 beats GTR on our data.
-
-### WP6: Inversion for EmbeddingGemma 2 vectors (optional, expensive)
-`/invert` is tied to GTR's space. To invert EmbeddingGemma 2 vectors, retrain the vec2text pair on its
-embeddings (see 4.4). Not needed unless sessions move off GTR.
+### WP6: Inversion for EmbeddingGemma 2 vectors — now ROADMAP M5
+GTR-alongside keeps every chunk invertible today. A Gemma-space inverter is a research track (text
+pilot first, then the multimodal check, then a paid A100 run); see section 0 and ROADMAP M5.
 
 ## 4. Training our own embedding model
 
@@ -379,9 +375,6 @@ Plus ORT arenas. Loading everything doesn't fit in 3.4 GB alongside the existing
 Lume references: `plan/SETUP.md` §3 and `plan/STATUS.md` ("Pi" sections) in the lume repo.
 
 ## 6. Open decisions
-- Default `task` when the caller gives none: currently no prefix (matches `encode()` without a
-  prompt). Alternative: default `document`. No prefix is the least surprising default.
-- Whether EmbeddingGemma 2 replaces SigLIP for images once WP3 lands, or both stay.
-- Which data may be used for training (ingested session text is user data; needs a consent decision).
-- Model naming for fine-tunes (`embeddinggemma-2-<suffix>`), and whether `/embed` should list served
-  models (`GET /embed/models`).
+Moved to ROADMAP.md ("Open decisions"). Settled since: EmbeddingGemma 2 replaces SigLIP for images
+once WP3 lands (ROADMAP M4). Still open here only as detail: model naming for fine-tunes
+(`embeddinggemma-2-<suffix>`) and whether `/embed` should list served models (`GET /embed/models`).

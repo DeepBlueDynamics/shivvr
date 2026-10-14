@@ -20,7 +20,7 @@
 
 Agents and edge applications constantly need to chunk documents, embed text or media, search recent context, and hand results back over HTTP or MCP — without standing up a permanent vector database or leaving sensitive session transcripts behind on disk.
 
-**shivvr** is an in-memory semantic embedding and retrieval service written in Rust on top of ONNX Runtime. It chunks incoming text on sentence boundaries, embeds it with **EmbeddingGemma 2** (the 768d default, with Matryoshka truncation down to 128d) or **GTR-T5-base**, embeds images and cross-modal text with **SigLIP**, fuses dense cosine similarity with **BM25** lexical search ([Lume](https://github.com/DeepBlueDynamics/lume)), and serves everything from ephemeral in-process memory.
+**shivvr** is an in-memory semantic embedding and retrieval service written in Rust on top of ONNX Runtime. It chunks incoming text on sentence boundaries, embeds it with **EmbeddingGemma 2** (the 768d default, with Matryoshka truncation down to 128d) or **GTR-T5-base** (kept alongside every chunk so it can be inverted back to text), embeds images with **SigLIP** until EmbeddingGemma 2's own image path is served ([roadmap](plan/ROADMAP.md)), fuses dense cosine similarity with **BM25** lexical search ([Lume](https://github.com/DeepBlueDynamics/lume)), and serves everything from ephemeral in-process memory.
 
 *What did this session just read, hear, or see — and how do we search it without leaving a trace on disk?*
 
@@ -36,7 +36,8 @@ logs and documents, on board and without a connection.
 ## Highlights
 
 - **EmbeddingGemma 2 default (768d, Matryoshka 512/256/128):** serves `POST /embed`, session ingest (`document` prefix), and search (`query` prefix) out of the box, with 19 task prefixes.
-- **GTR-T5-base & SigLIP spaces:** select `model: "gtr-t5-base"` for sessions or vectors that need `vec2text` inversion, or `siglip-base-patch16-224` (`/embed` and `/image/embed`) for shared text-to-image embeddings.
+- **GTR-T5-base alongside:** every chunk also keeps a GTR vector (returned with `"return_vectors": ["gtr-t5-base"]`) so `/invert` works on any session; choose `model: "gtr-t5-base"` to make GTR a store's search model too.
+- **SigLIP for images, for now:** `/image/embed` and `siglip-base-patch16-224` text vectors share one space for text-to-image search. EmbeddingGemma 2's own vision path replaces SigLIP once it's served (roadmap M4).
 - **Hybrid BM25 + vector search:** combines SIMD cosine similarity with [Lume](https://github.com/DeepBlueDynamics/lume)'s stemmed BM25 (MaxScore-pruned) in rank fusion, temporal recency decay, nearby-chunk context windows, and microsecond FST query guardrails.
 - **Ephemeral by design:** all sessions and 2-hour TTL named scratchpads (`/temp/:name`) live in process memory (`RwLock<HashMap>`) — restarting the container leaves a clean slate.
 - **Vec2text inversion (`/invert`):** reconstructs approximate text from 768d GTR-T5-base embeddings using an ONNX projection + T5 encoder/decoder loop.
@@ -46,24 +47,47 @@ logs and documents, on board and without a connection.
 
 ## Quick start
 
-Run on **CPU** (`linux/amd64` or `linux/arm64`, including Raspberry Pi 5 — 440 MB `int8` models):
+### CPU (amd64 or arm64, including Raspberry Pi 5)
+
+1. Create a volume for the models:
+
+   ```bash
+   docker volume create shivvr-models
+   ```
+
+2. Copy the int8 models (EmbeddingGemma 2 + GTR-T5-base, 440 MB) into it. This container fills
+   `/target` with the model files, replacing whatever is there, and exits:
+
+   ```bash
+   docker run --rm -v shivvr-models:/target deepbluedynamics/shivvr-models:int8
+   ```
+
+3. Start shivvr with the volume mounted read-only at `/models`:
+
+   ```bash
+   docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v shivvr-models:/models:ro deepbluedynamics/shivvr:latest-cpu
+   ```
+
+To keep the models in a folder on the host instead, use a new, empty folder in both commands, since
+step 2 replaces its contents:
 
 ```bash
-docker volume create shivvr-models
-docker run --rm -v shivvr-models:/target deepbluedynamics/shivvr-models:int8
-docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v shivvr-models:/models:ro deepbluedynamics/shivvr:latest-cpu
+mkdir shivvr-models
+docker run --rm -v "$PWD/shivvr-models:/target" deepbluedynamics/shivvr-models:int8
+docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v "$PWD/shivvr-models:/models:ro" deepbluedynamics/shivvr:latest-cpu
 ```
 
-> [!WARNING]
-> `shivvr-models:int8` wipes whatever is mounted at `/target` when its model version stamp changes. Always mount a dedicated named volume (`shivvr-models:/target`) or an empty directory — never a directory with other files in it.
+### GPU (amd64, NVIDIA driver 545+ and the [NVIDIA Container Toolkit](docs/BUILDING.md#1-host-gpu-setup-for-cuda-builds--containers))
 
-Or run on **GPU** (`linux/amd64`, NVIDIA driver 545+ and [NVIDIA Container Toolkit](docs/BUILDING.md#1-host-gpu-setup-for-cuda-builds--containers); ~4.4 GB pull with all fp32 models baked in):
+All models are in the image (about a 4.4 GB pull), so there's nothing to mount:
 
 ```bash
 docker run -d --name shivvr --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr
 ```
 
-Wait a few seconds for `/health` to report `"status": "ok"` (first-time ONNX session load can take up to 60 s), then ingest, search, and embed:
+### Try it
+
+`/health` answers once the models are loaded (up to 60 s on first start). Then ingest, search and embed:
 
 ```bash
 curl -s http://localhost:8080/health
@@ -79,7 +103,7 @@ curl -s -X POST http://localhost:8080/embed -H "Content-Type: application/json" 
 
 *(In Windows PowerShell, use `curl.exe` instead of the `curl` alias and escape inner double quotes or pipe a single-quoted JSON string).*
 
-That's it. No authentication is required unless `NUTS_AUTH_JWKS_URL` is set, and nothing is written to disk. Note that the CPU `int8` model set includes EmbeddingGemma 2 and GTR-T5-base only, so `/image/embed`, SigLIP `/embed`, and `/invert` return `503` on CPU unless you mount the fp32 models.
+That's it. No authentication is required unless `NUTS_AUTH_JWKS_URL` is set, and nothing is written to disk. The CPU int8 set holds EmbeddingGemma 2 and GTR-T5-base only: for `/image/embed`, SigLIP text vectors or `/invert` on CPU, mount the full fp32 model set (see [docs/BUILDING.md](docs/BUILDING.md)) or use the GPU image.
 
 ## Images
 
