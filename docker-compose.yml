@@ -13,7 +13,9 @@ services:
       - EMBEDDINGGEMMA2_MODEL_PATH=/models/embeddinggemma2-text.onnx
       - EMBEDDINGGEMMA2_TOKENIZER_PATH=/models/embeddinggemma2-tokenizer.json
       - TRANSCRIPTION_URL=http://hyperia-transcription:8765
-      - LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime
+      # Use the host NVIDIA driver (Docker Desktop/WSL2, driver 560+). On Linux with
+      # driver 545-559, use /usr/local/cuda-12.6/compat:/usr/lib/onnxruntime instead.
+      - LD_LIBRARY_PATH=/usr/lib/onnxruntime
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
       # Optional: set NUTS_AUTH_JWKS_URL to enable authentication
