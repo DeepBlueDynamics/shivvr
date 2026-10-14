@@ -6,6 +6,10 @@ REGION="us-central1"
 SERVICE="shivvr"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}"
 MODELS_IMAGE="gcr.io/${PROJECT_ID}/shivvr-models"
+GATEWAY_SERVICE="shivvr-landing"
+GATEWAY_IMAGE="gcr.io/${PROJECT_ID}/shivvr-gateway"
+HUB_IMAGE="docker.io/deepbluedynamics/shivvr"
+HUB_GATEWAY="docker.io/deepbluedynamics/shivvr-gateway"
 
 # Version comes from Cargo.toml, the single source of truth (see docs/OPERATIONS.md -> Versioning).
 # Images are pushed as :v<version> and :latest so a revision can always be traced to a tag.
@@ -29,7 +33,7 @@ echo "==> Building and pushing app image via Cloud Build..."
 gcloud builds submit \
   --tag "${IMAGE}:${TAG}" \
   --project "${PROJECT_ID}" \
-  --timeout 20m \
+  --timeout 40m \
   .
 
 gcloud container images add-tag -q "${IMAGE}:${TAG}" "${IMAGE}:latest" --project "${PROJECT_ID}"
@@ -61,3 +65,36 @@ gcloud run services describe "${SERVICE}" \
   --region "${REGION}" \
   --project "${PROJECT_ID}" \
   --format="value(status.url)"
+
+# Publish the rest of the release so one tag + deploy.sh covers all four images
+# (the tag's CI publishes the gateway and the -cpu images). Needs `docker login`
+# to Docker Hub as deepbluedynamics and `gcloud auth configure-docker`.
+# SKIP_PUBLISH=1 stops here.
+if [[ "${SKIP_PUBLISH:-}" == "1" ]]; then
+  echo "==> SKIP_PUBLISH=1: not copying images to Docker Hub or deploying the gateway."
+  exit 0
+fi
+
+echo "==> Copying the CUDA image to Docker Hub as ${HUB_IMAGE}:${VERSION}, ${TAG} and latest (registry to registry, ~10 min for 4.4 GB)..."
+docker buildx imagetools create \
+  --tag "${HUB_IMAGE}:${VERSION}" \
+  --tag "${HUB_IMAGE}:${TAG}" \
+  --tag "${HUB_IMAGE}:latest" \
+  "${IMAGE}:${TAG}"
+
+echo "==> Copying gateway ${HUB_GATEWAY}:${VERSION} (published by the tag's CI) to ${GATEWAY_IMAGE}:${TAG}..."
+if ! docker buildx imagetools inspect "${HUB_GATEWAY}:${VERSION}" >/dev/null 2>&1; then
+  echo "    ${HUB_GATEWAY}:${VERSION} is not on Docker Hub yet; wait for the tag's release workflow, then copy and deploy it with:" >&2
+  echo "    docker buildx imagetools create --tag ${GATEWAY_IMAGE}:${TAG} ${HUB_GATEWAY}:${VERSION}" >&2
+  echo "    gcloud run deploy ${GATEWAY_SERVICE} --image ${GATEWAY_IMAGE}:${TAG} --region ${REGION} --project ${PROJECT_ID}" >&2
+  exit 1
+fi
+docker buildx imagetools create --tag "${GATEWAY_IMAGE}:${TAG}" "${HUB_GATEWAY}:${VERSION}"
+
+echo "==> Deploying gateway ${TAG} to Cloud Run service ${GATEWAY_SERVICE} (shivvr.nuts.services)..."
+gcloud run deploy "${GATEWAY_SERVICE}" \
+  --image "${GATEWAY_IMAGE}:${TAG}" \
+  --region "${REGION}" \
+  --project "${PROJECT_ID}"
+
+echo "==> Release ${TAG} published: Cloud Run ${SERVICE} + ${GATEWAY_SERVICE}, Docker Hub ${HUB_IMAGE}:{${VERSION},${TAG},latest}."

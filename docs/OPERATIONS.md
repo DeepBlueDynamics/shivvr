@@ -78,16 +78,21 @@ git commit -am "release: v0.5.3"
 git tag -a v0.5.3 -m "shivvr v0.5.3"
 git push origin main v0.5.3          # triggers release.yml (gateway + multi-arch -cpu on GHCR & Docker Hub)
 
-# 2. build + deploy the CUDA app image (Cloud Build -> GCR -> Cloud Run)
-bash deploy.sh                       # pushes gcr.io/gnosis-459403/shivvr:v0.5.3 and :latest, deploys it
-
-# 3. copy the CUDA image from GCR to Docker Hub (no local 4.4 GB pull needed)
-docker buildx imagetools create \
-  -t deepbluedynamics/shivvr:0.5.3 \
-  -t deepbluedynamics/shivvr:v0.5.3 \
-  -t deepbluedynamics/shivvr:latest \
-  gcr.io/gnosis-459403/shivvr:v0.5.3
+# 2. when the tag's workflow has finished: build + deploy + publish the rest
+bash deploy.sh
 ```
+
+`deploy.sh` then:
+1. builds the CUDA app image on Cloud Build and pushes `gcr.io/gnosis-459403/shivvr:v0.5.3` and `:latest`;
+2. deploys it to Cloud Run `shivvr`;
+3. copies it to Docker Hub as `deepbluedynamics/shivvr:0.5.3`, `v0.5.3` and `latest` (registry to registry,
+   about 10 minutes for 4.4 GB);
+4. copies the gateway that CI published (`deepbluedynamics/shivvr-gateway:0.5.3`) into GCR;
+5. deploys it to Cloud Run `shivvr-landing` (shivvr.nuts.services).
+
+With the tag's CI (gateway and `-cpu` images), that publishes all four images. It needs `docker login` to Docker Hub as
+`deepbluedynamics` and `gcloud auth configure-docker`. `SKIP_PUBLISH=1 bash deploy.sh` stops after step 2. If the gateway
+isn't on Docker Hub yet, the script stops at step 4 and prints the two commands to finish by hand.
 
 ---
 
@@ -114,7 +119,7 @@ What it does:
    | `siglip-vision.onnx` | SigLIP base patch16-224, vision tower | `POST /image/embed` and `image_base64` ingest |
    | `siglip-text.onnx`, `siglip-tokenizer.json` | SigLIP base patch16-224, text tower | `POST /embed` with `model=siglip-base-patch16-224` |
 
-2. `gcloud builds submit --tag gcr.io/gnosis-459403/shivvr:v<version> --timeout 20m` compiles Rust with CUDA and copies `/models` from `shivvr-models:latest`. Cloud Build never uploads the gitignored `models/` directory, which is why the app image copies from the prebuilt models image. About 17 minutes. The image is then also tagged `:latest`.
+2. `gcloud builds submit --tag gcr.io/gnosis-459403/shivvr:v<version> --timeout 40m` compiles Rust with CUDA and copies `/models` from `shivvr-models:latest`. Cloud Build never uploads the gitignored `models/` directory, which is why the app image copies from the prebuilt models image. About 17 minutes before v0.6.0; the v0.6.0 build ran past 20 minutes (lume is now fetched and compiled from git), so the limit is 40. The image is then also tagged `:latest`.
 3. `gcloud run deploy shivvr --image ...:v<version>` creates the new revision with `NUTS_AUTH_JWKS_URL` and `NUTS_AUTH_VALIDATE_URL` set and routes 100% of traffic.
 
 The gateway (`shivvr-landing`, the public `shivvr.nuts.services` front door) is deployed separately using the image built by `.github/workflows/release.yml`:
