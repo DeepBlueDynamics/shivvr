@@ -45,7 +45,7 @@
 
 ### 2.5 Current Work & Uncommitted Working Tree
 - Commit `b131231`: `LANDING_ONLY` mode for GPU-less front door.
-- Unstaged files (pre-existing): `Dockerfile.gateway`, `src/bin/gateway.rs`, `cloudbuild-gateway.yaml`, `DEPLOY_PLAN.md`, `DEPLOY_STATUS_2026-09-16.md`, `tests/functional.py`.
+- Unstaged files (pre-existing): `Dockerfile.gateway`, `src/bin/gateway.rs`, `plan/archive/DEPLOY_PLAN.md`, `plan/archive/DEPLOY_STATUS_2026-09-16.md`, `tests/functional.py`.
 - Working tree line endings: CRLF differences present in checked-out source files.
 - Antigravity edits: **None**.
 

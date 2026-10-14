@@ -122,7 +122,7 @@ Shivvr exposes a native Model Context Protocol (MCP) JSON-RPC 2.0 server over Se
 
 Per instructions, **no inversion model is implemented for SigLIP**.
 - Status: Retained as planning-only.
-- Prior plan reference: [`plan/SIGLIP_INVERSION_PLAN.md`](file:///workspace/shivvr/plan/SIGLIP_INVERSION_PLAN.md).
+- Prior plan reference: [`plan/archive/SIGLIP_INVERSION_PLAN.md`](file:///workspace/shivvr/plan/archive/SIGLIP_INVERSION_PLAN.md).
 - Candidate architecture under study: SigLIP2 / SigLIP vision vec2text architecture (requires separate inverted projection + T5 or autoregressive decoder).
 
 ---
