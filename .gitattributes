@@ -1,0 +1,5 @@
+# Shell scripts must keep LF line endings on every checkout, including Windows
+# with core.autocrlf=true: bash fails on CRLF ("syntax error: unexpected end of
+# file"), which broke `bash deploy.sh` on a Windows checkout during the v0.6.0
+# release.
+*.sh text eol=lf
