@@ -4,3 +4,16 @@ models/
 models-int8/
 training/
 guardrails/
+**/target/
+.nemesis8.toml
+.claude/
+.venv/
+**/__pycache__/
+*.tar.gz
+.env*
+plan/
+docs/
+tests/
+.github/
+deploy/
+*.md

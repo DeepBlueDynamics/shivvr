@@ -1,5 +1,5 @@
 #[cfg(feature = "ml")]
-use shivvr::{api, audio, auth, chunker, crypto, embedder, embeddinggemma, inverter, openai, store, temp_store, vision};
+use shivvr::{api, audio, auth, chunker, crypto, embedder, embeddinggemma, inverter, openai, store, temp_store, text_model, vision};
 #[cfg(feature = "ml")]
 use std::sync::Arc;
 #[cfg(feature = "ml")]
@@ -117,21 +117,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("Loading guardrails from {}...", guardrails_dir);
-    let tagger = match lume_hybrid::Tagger::from_data_dir(&guardrails_dir) {
+    let tagger = match lume::Tagger::from_data_dir(&guardrails_dir) {
         Ok(t) => {
             println!("Guardrails loaded successfully. Active entries: {}", t.record_count());
             t
         }
         Err(e) => {
             println!("WARNING: Failed to load guardrails from {}: {} — fallback to empty tagger", guardrails_dir, e);
-            lume_hybrid::Tagger::build(Vec::<lume_hybrid::Entry>::new()).unwrap()
+            lume::Tagger::build(Vec::<lume::Entry>::new()).unwrap()
         }
     };
         let guardrail_tagger = Arc::new(std::sync::RwLock::new(tagger));
     // Was `SearchConfig::default()` in the old rust-hybrid-search crate. Lume
     // split that into Bm25Params (tuning) + SearchVariant (selector). We hold
     // the params; variant is selected per call in the search handlers.
-    let search_params = lume_hybrid::bm25::Bm25Params::default();
+    let search_params = lume::bm25::Bm25Params::default();
     let mcp_connections = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
 
@@ -200,12 +200,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             println!(
-                "EmbeddingGemma 2 text embedder not available: {} — /embed model=embeddinggemma-2 disabled",
+                "EmbeddingGemma 2 text embedder not available: {} — default text model falls back to gtr-t5-base",
                 e
             );
             None
         }
     };
+
+    let text_models = Arc::new(text_model::TextEmbedders::new(embedder.clone(), embeddinggemma2.clone()));
+    println!("Default text model: {}", text_models.default_model());
 
     let state = Arc::new(api::AppState {
         store,
@@ -219,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
         vision_embedder,
         siglip_text,
         embeddinggemma2,
+        text_models,
         start_time: std::time::Instant::now(),
         nuts_auth,
         openai_auth_required,

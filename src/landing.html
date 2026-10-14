@@ -166,7 +166,7 @@
 <div class="features">
   <div class="feature">
     <div class="name">Ingest</div>
-    <p>Sentence-boundary chunking + GTR-T5-base embeddings (768d). Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
+    <p>Sentence-boundary chunking + EmbeddingGemma 2 (default, 768d) or GTR-T5-base embeddings. Stores in RwLock&lt;HashMap&gt; — pure ephemeral compute.</p>
   </div>
   <div class="feature">
     <div class="name">FST-BM25 Hybrid Search</div>
@@ -212,7 +212,7 @@
   <tr><td class="method">POST</td><td><code>/agent/:id/encrypt</code></td><td>Encrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/agent/:id/decrypt</code></td><td>Decrypt embeddings</td></tr>
   <tr><td class="method">POST</td><td><code>/invert</code></td><td>Reconstruct text from embedding vector</td></tr>
-  <tr><td class="method">POST</td><td><code>/embed</code></td><td>Batched text vectors, no store side effects. <code>model</code>: <code>gtr-t5-base</code> (default, 768d), <code>siglip-base-patch16-224</code> (SigLIP text space, comparable with <code>/image/embed</code>) or <code>embeddinggemma-2</code> (768d; optional <code>task</code> and <code>dimensions</code>, see below)</td></tr>
+  <tr><td class="method">POST</td><td><code>/embed</code></td><td>Batched text vectors, no store side effects. <code>model</code>: <code>embeddinggemma-2</code> (default, 768d; optional <code>task</code> and <code>dimensions</code>, see below), <code>gtr-t5-base</code> (768d) or <code>siglip-base-patch16-224</code> (SigLIP text space, comparable with <code>/image/embed</code>)</td></tr>
   <tr><td class="method">POST</td><td><code>/image/embed</code></td><td>SigLIP image vector (768d) from <code>image_base64</code>; same space as SigLIP text</td></tr>
   <tr><td class="method">POST</td><td><code>/audio/transcribe</code></td><td>Transcript from <code>audio_base64</code> via the transcription service</td></tr>
   <tr><td class="method">POST</td><td><code>/audio/embed</code></td><td>Transcript + GTR-T5 vector from <code>audio_base64</code></td></tr>
@@ -272,7 +272,7 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 <table>
   <tr><th>Field</th><th>Default</th><th>Description</th></tr>
   <tr><td><code>texts</code></td><td>required</td><td>1–256 strings, 32 KiB each</td></tr>
-  <tr><td><code>model</code></td><td>gtr-t5-base</td><td><code>gtr-t5-base</code>, <code>siglip-base-patch16-224</code> or <code>embeddinggemma-2</code>; 503 if that model is not loaded</td></tr>
+  <tr><td><code>model</code></td><td>embeddinggemma-2</td><td><code>embeddinggemma-2</code> (default), <code>gtr-t5-base</code> or <code>siglip-base-patch16-224</code>; 503 if that model is not loaded</td></tr>
   <tr><td><code>task</code></td><td>none</td><td><code>embeddinggemma-2</code> only: prompt prefix by name, e.g. <code>query</code>, <code>document</code>, <code>Clustering</code>, <code>Classification</code>, <code>STS</code>, <code>CodeRetrieval</code>, <code>QuestionAnswering</code>, <code>FactChecking</code> (case-insensitive)</td></tr>
   <tr><td><code>dimensions</code></td><td>768</td><td><code>embeddinggemma-2</code> only: 128, 256, 512 or 768 (Matryoshka truncation, re-normalized)</td></tr>
 </table>
@@ -306,11 +306,13 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
 <div class="tbl-wrap">
 <table>
   <tr><th>Image</th><th>Contents</th></tr>
-  <tr><td><code>deepbluedynamics/shivvr</code></td><td>The service: CUDA build with GTR-T5-base, the vec2text inverter, SigLIP and EmbeddingGemma 2 baked in (linux/amd64, NVIDIA GPU or CPU)</td></tr>
-  <tr><td><code>deepbluedynamics/shivvr-gateway</code></td><td>The GPU-less front door: auth, this page, and a proxy to the backend (linux/amd64)</td></tr>
+  <tr><td><code>deepbluedynamics/shivvr</code></td><td>CUDA build with EmbeddingGemma 2, GTR-T5-base, SigLIP and the vec2text inverter baked in (<code>latest</code>, <code>X.Y.Z</code>, <code>vX.Y.Z</code>; linux/amd64)</td></tr>
+  <tr><td><code>deepbluedynamics/shivvr:latest-cpu</code></td><td>CPU build with no models baked in (<code>latest-cpu</code>, <code>X.Y.Z-cpu</code>, <code>vX.Y.Z-cpu</code>; linux/amd64, linux/arm64); mount <code>/models</code> from <code>shivvr-models:int8</code></td></tr>
+  <tr><td><code>deepbluedynamics/shivvr-models:int8</code></td><td>One-shot volume installer (440 MB int8): EmbeddingGemma 2 text + GTR-T5-base (linux/amd64, linux/arm64)</td></tr>
+  <tr><td><code>deepbluedynamics/shivvr-gateway</code></td><td>The GPU-less front door: auth, this page, and a proxy to the backend (<code>latest</code>, <code>X.Y.Z</code>, <code>vX.Y.Z</code>; linux/amd64)</td></tr>
 </table>
 </div>
-<p class="hint">Tags: <code>latest</code>, <code>X.Y.Z</code> and <code>vX.Y.Z</code> on Docker Hub. Run with <code>docker run --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr</code>.</p>
+<p class="hint">GPU: <code>docker run --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr</code> &middot; CPU: populate a <code>shivvr-models</code> volume with <code>deepbluedynamics/shivvr-models:int8</code> and mount at <code>/models:ro</code> on <code>deepbluedynamics/shivvr:latest-cpu</code>.</p>
 
 <h2>Stack</h2>
 <div class="tbl-wrap">
@@ -320,8 +322,8 @@ nemesis8 mcp add https://shivvr.nuts.services/mcp/sse
   <tr><td>Cognition</td><td>GhostAgent cognitive RAG turn loop (OpenAI / Anthropic compat)</td></tr>
   <tr><td>MCP Server</td><td>HTTP/SSE JSON-RPC 2.0 Model Context Protocol transport layer</td></tr>
   <tr><td>Hybrid Index</td><td>Tantivy FST deterministic phrase engine + BM25F field indexer</td></tr>
-  <tr><td>Embedding</td><td>GTR-T5-base (768d) via ONNX Runtime 2.0 — local, required</td></tr>
-  <tr><td>Text embedding (<code>/embed</code>)</td><td>GTR-T5-base (default), SigLIP text tower, EmbeddingGemma 2 text path (768d, Matryoshka to 512/256/128) — the last two optional</td></tr>
+  <tr><td>Embedding</td><td>EmbeddingGemma 2 (768d default, Matryoshka to 512/256/128) &amp; GTR-T5-base (768d) via ONNX Runtime 2.0</td></tr>
+  <tr><td>Text embedding (<code>/embed</code>)</td><td>EmbeddingGemma 2 (default), GTR-T5-base, SigLIP text tower (768d, shared space with <code>/image/embed</code>)</td></tr>
   <tr><td>Storage</td><td>Ephemeral RwLock&lt;HashMap&gt; — no disk, no volume mounts</td></tr>
   <tr><td>GPU</td><td>CUDA 12.6 via ort EP on Cloud Run L4 — CPU fallback automatic</td></tr>
   <tr><td>Inversion</td><td>vec2text gtr-base (projection + T5 enc/dec) — optional</td></tr>

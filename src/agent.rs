@@ -1,7 +1,7 @@
 use crate::store::Store;
 use crate::temp_store::TempStore;
 use crate::chunker::Chunker;
-use crate::embedder::Embedder;
+use crate::text_model::{Purpose, TextEmbedders};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,19 +59,32 @@ pub struct GhostAgent {
     store: Arc<Store>,
     temp_store: Arc<TempStore>,
     chunker: Arc<Chunker>,
-    embedder: Arc<Embedder>,
+    text_models: Arc<TextEmbedders>,
     client: reqwest::Client,
 }
 
 impl GhostAgent {
-    pub fn new(store: Arc<Store>, temp_store: Arc<TempStore>, chunker: Arc<Chunker>, embedder: Arc<Embedder>) -> Self {
+    pub fn new(store: Arc<Store>, temp_store: Arc<TempStore>, chunker: Arc<Chunker>, text_models: Arc<TextEmbedders>) -> Self {
         Self {
             store,
             temp_store,
             chunker,
-            embedder,
+            text_models,
             client: reqwest::Client::new(),
         }
+    }
+
+    /// The session's text model, or the server default for a new session.
+    fn session_model(&self, session_id: &str) -> &'static str {
+        self.store
+            .session_model(session_id)
+            .and_then(|m| self.text_models.resolve(Some(&m)).ok())
+            .unwrap_or_else(|| self.text_models.default_model())
+    }
+
+    fn embed_query(&self, session_id: &str, query: &str) -> Option<Vec<f32>> {
+        let model = self.session_model(session_id);
+        self.text_models.embed(model, Purpose::Query, query).ok()
     }
 
     /// Primary Turn Loop for the Agent
@@ -91,7 +104,7 @@ impl GhostAgent {
         emit(AgentEvent::Status("Recalling memories and preparing workspace...".to_string()));
 
         // Step 1: Memory Recall
-        let query_embedding = self.embedder.embed(&user_message).ok();
+        let query_embedding = self.embed_query(&session_id, &user_message);
         let recall_context = match self.store.search_hybrid(
             &session_id,
             &user_message,
@@ -101,7 +114,7 @@ impl GhostAgent {
             168.0,
             "organize",
             &[],
-            &lume_hybrid::bm25::Bm25Params::default(),
+            &lume::bm25::Bm25Params::default(),
         ) {
             Ok(results) => {
                 if results.is_empty() {
@@ -244,7 +257,7 @@ impl GhostAgent {
                 let query_embedding = if lexical_only {
                     None
                 } else {
-                    self.embedder.embed(query).ok()
+                    self.embed_query(session_id, query)
                 };
 
                 match self.store.search_hybrid(
@@ -256,7 +269,7 @@ impl GhostAgent {
                     168.0,
                     "organize",
                     &[],
-                    &lume_hybrid::bm25::Bm25Params::default(),
+                    &lume::bm25::Bm25Params::default(),
                 ) {
                     Ok(results) => {
                         let mapped: Vec<serde_json::Value> = results.into_iter().map(|(chunk, score)| {
@@ -279,10 +292,21 @@ impl GhostAgent {
                 let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let source = args.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
 
+                let model = self.session_model(session_id);
                 match self.chunker.chunk(text, source, serde_json::Value::Null).await {
-                    Ok(chunks) => {
+                    Ok(mut chunks) => {
+                        if model != crate::embed_api::EMBED_MODEL {
+                            for chunk in chunks.iter_mut() {
+                                match self.text_models.embed(model, Purpose::Document, &chunk.text) {
+                                    Ok(v) => chunk.embedding_gtr = Some(std::mem::replace(&mut chunk.embedding, v)),
+                                    Err(e) => return format!("Error embedding chunk: {}", e),
+                                }
+                            }
+                        }
                         if chunks.is_empty() {
                             "Success: Text was too short or no chunks produced.".to_string()
+                        } else if let Err(e) = self.store.claim_model(session_id, model, None) {
+                            format!("Error: {}", e)
                         } else {
                             let first_id = chunks[0].id.clone();
                             match self.store.add_chunks(session_id, chunks, None) {

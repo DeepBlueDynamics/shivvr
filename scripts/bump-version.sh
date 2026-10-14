@@ -55,9 +55,14 @@ awk -v next_version="$NEXT" '
     { print }
 ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
 
-# Refresh the shivvr entry in Cargo.lock without touching other dependencies,
-# then make sure the release build still compiles.
-cargo update --offline -p shivvr >/dev/null 2>&1 || cargo update -p shivvr
+# Refresh the shivvr entry in Cargo.lock without touching other dependencies
+# (any cargo command rewrites the root package's version; `cargo update -p`
+# does not reliably do it), then confirm it and that the release build compiles.
+cargo metadata --format-version 1 --offline >/dev/null
+if ! grep -A1 '^name = "shivvr"$' Cargo.lock | grep -q "^version = \"${NEXT}\"$"; then
+    echo "Cargo.lock still has the old shivvr version; run cargo metadata and check" >&2
+    exit 1
+fi
 cargo check --release --locked
 
 echo "==> ${CURRENT} -> ${NEXT}"

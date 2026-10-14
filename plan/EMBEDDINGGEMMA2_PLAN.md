@@ -2,6 +2,77 @@
 
 Status as of 2026-10-06. Owner: Kord. Work packages (WP) are sized for one worker each.
 
+## 0. Direction (decided 2026-10-14)
+
+**EmbeddingGemma 2 is the default model; GTR-T5-base stays and can be selected.**
+- `/embed`, session and temp ingest, and search use `embeddinggemma-2` unless the request names
+  `gtr-t5-base`. Ingest applies the `document` prefix and search the `query` prefix automatically.
+- A session or temp store takes its model on its first ingest (optional `model`) and keeps it.
+  Search embeds with the session's model. Mixing models in one session is rejected.
+- `/invert` stays GTR-only, so sessions that need inversion choose `gtr-t5-base`.
+- SigLIP stays for images until EmbeddingGemma 2's vision path (WP3) lands, then retires.
+  Native audio (WP4) replaces transcribe-then-embed for `/audio/embed`.
+- Breaking change for clients that relied on the GTR default (e.g. lume), so it ships as 0.6.0.
+
+**Four images, one release:**
+
+| Image | Runs | Contents |
+|---|---|---|
+| `shivvr:gpu` | Local NVIDIA | CUDA, all models built in |
+| `shivvr:cpu` | Local CPU, Pi (amd64 + arm64) | CPU build **with the int8 models built in** (one `docker run`, no models volume) |
+| Cloud frontend | Cloud Run `shivvr-landing` | Gateway: auth, docs page, wakes the backend |
+| Cloud backend | Cloud Run `shivvr` | Only the models the cloud serves; GPU only if the benchmark shows it pays |
+
+A tag push builds all four, pushes them to Docker Hub and GCR, and deploys the cloud pair. No hand copies.
+
+**Lume 0.16 instead of the vendored copy (0.6.0, done):** replaced `vendor/lume-hybrid` (a 2026-06 snapshot)
+with `lume = { git = "https://github.com/DeepBlueDynamics/lume", tag = "v0.16.0", default-features = false }`
+and rename `lume_hybrid::` → `lume::`. The APIs shivvr uses are unchanged (Tagger, Entry, bm25::Section,
+Bm25Index::build/search, SearchVariant, regex). `Bm25Params` gained `coord_floor` (we use `::default()`).
+Behavior change: `Bm25Index::build` now stems and uses coord floor 1.0, so hybrid/lexical rankings shift,
+judged better in lume's evals. MaxScore pruning cut BM25 p50 from 111.6 to 6.77 ms in lume's TREC-COVID
+benchmark (lume's numbers, not measured in shivvr), with identical rankings. Later: adapt lume's fusion
+modes (RRF k=60, normalized-v2) from `hybrid::blend_hybrid_scores_with_mode`. Not worth it for
+ephemeral sessions: spelling, semantic mesh, graph boost.
+
+**GTR runs alongside (0.6.0, agreed with lume 2026-10-14):** every text chunk keeps two vectors,
+the store's search vector (`embedding`, EmbeddingGemma 2 by default) and the GTR-T5-base vector the
+chunker already computes (no extra inference). So `/invert` works for chunks in every session, not just
+GTR sessions. The GTR vector is returned only on request, using a generic shape that leaves room for
+more models:
+- Ingest request: `"return_vectors": ["gtr-t5-base"]` (an unknown name is a 400).
+- Response, per chunk: `"embeddings": {"gtr-t5-base": [...768]}`. Absent unless requested. Image
+  chunks have no GTR vector.
+- `embedding` stays the store's search vector, unchanged. Search results return no vectors.
+- `/embed` keeps returning `model`; `/invert` keeps the `{embedding, max_length}` form.
+- Invert-by-reference (`{session_id, chunk_id}`) was considered and dropped: callers that invert want
+  the vector on the wire anyway.
+
+**Inverter for EmbeddingGemma 2's space (research, after 0.6.0):** Gemma puts text, images, audio
+and video in one space, so a vec2text-style inverter trained on Gemma vectors could turn image and
+audio vectors into text (rough captions/transcripts) as well as text.
+1. Text pilot on a local RTX 3060: ~100k (text, Gemma `document` vector) pairs, hypothesis model only.
+   Measure re-embed cosine and BLEU on held-out text. Go/no-go for step 3.
+2. Zero-shot modality check: invert COCO-style image vectors and audio vectors with the pilot model to
+   size the modality gap.
+3. Full run on a spot A100 (~3–5 days, ~$100–200, estimate): text + caption + transcript pairs, then
+   the corrector. Needs Kord's OK for the spend.
+4. Serve it as a second inverter; `/invert` picks the inverter by the vector's model.
+Data: MS MARCO as for GTR, plus public marine text (lume's `docs/cruiser_library.csv`, ~472 public
+references). Never boat logbooks or telemetry: private owner data that needs explicit consent.
+Lume has no current use for it (a possible future one is camera stills and VHF/engine audio on board),
+so don't size it around lume. `training/` stays the home; first fix its 384d hard-coding and make the
+corrector re-embed with the target model. Retrieval check: `lume eval` on `docs/monte_cristo`
+(Hit@k/MRR/nDCG) to confirm Gemma doesn't rank worse than GTR on that corpus.
+
+**Lume compatibility:** lume's scratch-ingest → `/invert` path must send GTR. Lume will switch it to
+`POST /embed {"model":"gtr-t5-base"}` (works on 0.5.x). Its temp-store search is covered by per-store
+pinning plus server-side prefixes. Don't release 0.6.0 until Kord confirms the lume change.
+
+**Order:** README/repo cleanup → default switch (0.6.0) → CPU image with built-in models → single
+release pipeline → GPU export fix and L4 benchmark (decides GPU vs CPU for the cloud backend)
+→ WP3/WP4 (images, audio) and retire SigLIP.
+
 ## 1. The model
 
 `google/embeddinggemma-2` (Apache 2.0, not gated).
@@ -43,7 +114,7 @@ separate tower output like SigLIP's.
   files are copied into the existing stage. Cloud Build timeout raised to 3600s.
 - Env vars `EMBEDDINGGEMMA2_MODEL_PATH` and `EMBEDDINGGEMMA2_TOKENIZER_PATH` in the Dockerfile,
   docker-compose, README and OPERATIONS.
-- Docs: OPERATIONS.md has the models-image contents, `/health` model list and a troubleshooting entry;
+- Docs: docs/OPERATIONS.md has the models-image contents, `/health` model list and a troubleshooting entry;
   the backend homepage and landing page (`src/api.rs`, `src/landing.html`) list the `/embed` models and
   the `task`/`dimensions` fields. The MCP tools do not expose `/embed`, and there is no
   OpenAI-compatible `/v1/embeddings` route, so neither needed changes.

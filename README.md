@@ -1,429 +1,183 @@
+<div align="center">
+
+<img src="assets/shivvr-icon.svg" alt="shivvr" width="128" height="128">
+
 # shivvr
 
-Ephemeral semantic embedding service. Ingests text, chunks it, embeds it with GTR-T5-base (768d), and returns ranked results. `POST /embed` also serves SigLIP text vectors (same space as image vectors) and EmbeddingGemma 2 text vectors, and an OpenAI embedder can be added for the `retrieve` role. No persistence — all state is in-process and lost on restart.
+**Ephemeral semantic memory and multimodal embeddings in one container.**
 
-Rust + ONNX Runtime. Runs in Docker on port 8080.
+[![Release](https://github.com/DeepBlueDynamics/shivvr/actions/workflows/release.yml/badge.svg)](https://github.com/DeepBlueDynamics/shivvr/actions/workflows/release.yml)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](https://www.rust-lang.org/)
+[![Docker Pulls](https://img.shields.io/docker/pulls/deepbluedynamics/shivvr.svg?logo=docker)](https://hub.docker.com/r/deepbluedynamics/shivvr)
+[![MCP](https://img.shields.io/badge/MCP-server-6E56CF.svg)](#mcp--agent-chat)
 
-## What it does
+[Quick start](#quick-start) · [Images](#images) · [Features](#features) · [Architecture](#architecture)
 
-- **Ingest** — chunks text by sentence boundaries and embeds each chunk with GTR-T5-base (768d, local, always on). Optional `audio_base64` is transcribed first; optional `image_base64` adds an image chunk embedded with SigLIP
-- **Search** — cosine similarity, optional temporal decay, optional BM25 hybrid or lexical-only ranking, and a query guardrail
-- **Embedders**
-  - GTR-T5-base (768d) — ingest, search (`organize` role), and the default for `/embed`. Required
-  - SigLIP base patch16-224 (768d) — image vectors (`/image/embed`, image ingest) and text vectors in the same space (`/embed`), for text-to-image comparison. Optional
-  - EmbeddingGemma 2, text only (768d, Matryoshka 128/256/512) — `/embed` with task prefixes. Optional
-  - OpenAI text-embedding-ada-002 (1536d) — `retrieve` role on ingest and search, when `OPENAI_API_KEY` is set or the caller passes `openai_api_key`. Optional
-- Vectors from different models are not comparable with each other, and `/invert` only reconstructs GTR vectors
-- **Per-agent encryption** — orthogonal matrix rotation on embeddings; preserves cosine similarity, keys ephemeral
-- **Vec2text inversion** — reconstruct approximate text from a GTR vector (optional, requires inverter models)
-- **Temp store** — named ephemeral vector stores with 2 hr TTL, separate from session store
-- **Auth** — nuts-auth JWT + API token verification (optional; open dev mode if `NUTS_AUTH_JWKS_URL` unset)
+</div>
 
-## Prerequisites
+---
 
-### NVIDIA Driver
+Agents and edge applications constantly need to chunk documents, embed text or media, search recent context, and hand results back over HTTP or MCP — without standing up a permanent vector database or leaving sensitive session transcripts behind on disk.
 
-The Docker image uses CUDA 12.6. Host driver must be **545+**.
+**shivvr** is an in-memory semantic embedding and retrieval service written in Rust on top of ONNX Runtime. It chunks incoming text on sentence boundaries, embeds it with **EmbeddingGemma 2** (the 768d default, with Matryoshka truncation down to 128d) or **GTR-T5-base**, embeds images and cross-modal text with **SigLIP**, fuses dense cosine similarity with **BM25** lexical search ([Lume](https://github.com/DeepBlueDynamics/lume)), and serves everything from ephemeral in-process memory.
 
-```bash
-# Check
-nvidia-smi
+*What did this session just read, hear, or see — and how do we search it without leaving a trace on disk?*
 
-# Ubuntu/Debian upgrade
-sudo apt-get install -y nvidia-driver-590 && sudo reboot
-```
+### Built for places where the cloud is optional
 
-Windows: download from nvidia.com, run installer, reboot.
+Where a GPU is available, `deepbluedynamics/shivvr:latest` ships CUDA 12.6 with every fp32 model baked into the image. On small machines and at the edge — including a Raspberry Pi 5 running HaLOS — `deepbluedynamics/shivvr:latest-cpu` pairs with a 440 MB `int8` model volume (`deepbluedynamics/shivvr-models:int8`) to serve EmbeddingGemma 2 and GTR-T5-base in ~820 MiB of RAM ([`deploy/halos/`](deploy/halos/README.md)).
 
-### Docker + NVIDIA Container Toolkit
+An open source project from [DeepBlue Dynamics](https://github.com/deepbluedynamics/),
+which builds open source agentic tooling for the marine electronics market.
+DeepBlue's promise: agents and people can ask questions of a boat's instruments,
+logs and documents, on board and without a connection.
 
-**Linux:**
-```bash
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
+## Highlights
 
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
-```
-
-**Windows:** Docker Desktop with WSL 2 backend includes GPU support automatically.
-
-### Models
-
-Models are not in the repo: GTR-T5-base, the vec2text inverter, the SigLIP vision and
-text towers, the SigLIP tokenizer JSON, and the EmbeddingGemma 2 text model and
-tokenizer JSON. Everything but EmbeddingGemma 2 is about 2.2 GB; the EmbeddingGemma 2
-text model (270M parameters, float32) adds roughly another 1 GB, not measured yet. They come
-from a prebuilt image, `gcr.io/gnosis-459403/shivvr-models:latest`, which
-`Dockerfile.models` produces and the app `Dockerfile` copies `/models` from. Rebuild
-that image only when the export scripts change:
-
-```bash
-bash deploy.sh --rebuild-models    # Cloud Build
-```
-
-`docker compose build` pulls the models image from GCR, so authenticate first
-(`gcloud auth configure-docker`) or point the build elsewhere with
-`docker compose build --build-arg MODELS_IMAGE=<image>`.
-
-Only GTR-T5-base is required at startup. A missing inverter, SigLIP or EmbeddingGemma 2
-file logs a line and disables that feature (`/invert`, `/image/embed`, or that `/embed`
-model returns `503`).
-
-To run the binary outside Docker, export into `models/` locally instead:
-
-```bash
-bash scripts/fetch_models.sh                            # GTR-T5-base + vec2text, with verification
-pip install torch transformers sentencepiece protobuf onnx onnxruntime
-python scripts/export_siglip.py --output_dir models/    # SigLIP towers + siglip-tokenizer.json
-```
-
-`export_siglip.py` builds the fast tokenizer JSON straight from `spiece.model`
-(transformers has no converter for `SiglipTokenizer`) and verifies it against the
-slow tokenizer before writing it, so a mismatch fails the export instead of shipping
-wrong vectors.
-
-EmbeddingGemma 2 needs a newer stack than the two exports above (`Dockerfile.models`
-runs it in its own Python 3.12 stage), so use a separate virtualenv:
-
-```bash
-pip install "torch>=2.9" "transformers>=5.18" "sentence-transformers>=6.1" onnx onnxscript onnxruntime
-python scripts/export_embeddinggemma2.py --output_dir models/   # embeddinggemma2-text.onnx + embeddinggemma2-tokenizer.json
-```
-
-The script exports the text backbone only, in float32 (the model produces NaN in
-float16), with masked mean pooling and L2 normalization in the graph. It fails unless
-the tokenizer JSON reproduces SentenceTransformer's token ids and the ONNX output
-reaches cosine >= 0.9999 (`--min_cosine`) against `SentenceTransformer.encode()`.
-
-**Not verified yet:** the EmbeddingGemma 2 export script and its `Dockerfile.models`
-stage have not been run end to end, so no real EmbeddingGemma 2 vector has been
-produced or checked against Python. That is WP1 in `plan/EMBEDDINGGEMMA2_PLAN.md`.
+- **EmbeddingGemma 2 default (768d, Matryoshka 512/256/128):** serves `POST /embed`, session ingest (`document` prefix), and search (`query` prefix) out of the box, with 19 task prefixes.
+- **GTR-T5-base & SigLIP spaces:** select `model: "gtr-t5-base"` for sessions or vectors that need `vec2text` inversion, or `siglip-base-patch16-224` (`/embed` and `/image/embed`) for shared text-to-image embeddings.
+- **Hybrid BM25 + vector search:** combines SIMD cosine similarity with [Lume](https://github.com/DeepBlueDynamics/lume)'s stemmed BM25 (MaxScore-pruned) in rank fusion, temporal recency decay, nearby-chunk context windows, and microsecond FST query guardrails.
+- **Ephemeral by design:** all sessions and 2-hour TTL named scratchpads (`/temp/:name`) live in process memory (`RwLock<HashMap>`) — restarting the container leaves a clean slate.
+- **Vec2text inversion (`/invert`):** reconstructs approximate text from 768d GTR-T5-base embeddings using an ONNX projection + T5 encoder/decoder loop.
+- **Per-agent orthogonal encryption:** multiplies vectors by an agent's registered orthogonal matrix (`v @ Q`), preserving exact cosine similarity while keeping embeddings opaque.
+- **GPU and multi-arch CPU images:** runs on `linux/amd64` with CUDA 12.6 or on `linux/amd64` and `linux/arm64` CPU with quantized `int8` models.
+- **Native MCP server & `nuts-auth`:** exposes memory tools over `/mcp/sse` + `/mcp/message` and supports optional RS256 JWT and `ahp_` API token verification.
 
 ## Quick start
 
+Run on **CPU** (`linux/amd64` or `linux/arm64`, including Raspberry Pi 5 — 440 MB `int8` models):
+
 ```bash
-docker compose up -d
+docker volume create shivvr-models
+docker run --rm -v shivvr-models:/target deepbluedynamics/shivvr-models:int8
+docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v shivvr-models:/models:ro deepbluedynamics/shivvr:latest-cpu
 ```
 
-Builds from source with CUDA, with models copied in from the prebuilt models image (see above).
-Listens on `:8080` inside the container; compose maps it to `:8085`. No volume needed.
-The examples below use `localhost:8080`; through compose, use `localhost:8085`.
+> [!WARNING]
+> `shivvr-models:int8` wipes whatever is mounted at `/target` when its model version stamp changes. Always mount a dedicated named volume (`shivvr-models:/target`) or an empty directory — never a directory with other files in it.
 
-### Prebuilt images
-
-| Image | Tags | What |
-|---|---|---|
-| `deepbluedynamics/shivvr` | `X.Y.Z`, `vX.Y.Z`, `latest` | CUDA build, all models baked in (linux/amd64) |
-| `deepbluedynamics/shivvr` | `X.Y.Z-cpu`, `vX.Y.Z-cpu`, `latest-cpu` | CPU build, no models (linux/amd64, linux/arm64); mount a model directory at `/models` |
-| `deepbluedynamics/shivvr-models` | `int8` | int8 GTR-T5-base + EmbeddingGemma 2 text (440 MB) for the CPU build |
-| `deepbluedynamics/shivvr-gateway` | `X.Y.Z`, `vX.Y.Z`, `latest` | GPU-less front door (auth, landing page, proxy) |
+Or run on **GPU** (`linux/amd64`, NVIDIA driver 545+ and [NVIDIA Container Toolkit](docs/BUILDING.md#1-host-gpu-setup-for-cuda-builds--containers); ~4.4 GB pull with all fp32 models baked in):
 
 ```bash
-docker run --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr              # CUDA
-docker run -p 127.0.0.1:8080:8080 -v ./models-int8:/models:ro deepbluedynamics/shivvr:latest-cpu
+docker run -d --name shivvr --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr
 ```
 
-### CPU and Raspberry Pi
-
-`Dockerfile.cpu` builds without CUDA for amd64 and arm64 on Debian trixie (the ONNX Runtime that
-`ort` downloads needs glibc >= 2.38). `scripts/quantize_models.py` turns the fp32 exports into the
-int8 set and checks each model against fp32. `deploy/halos/` is a HaLOS container app (Raspberry
-Pi 5) that installs the int8 models and runs the CPU image on `127.0.0.1:8285`; see
-[deploy/halos/README.md](deploy/halos/README.md).
-
-## API
-
-### Sessions
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Status, version, loaded models, session/chunk counts |
-| POST | `/sessions/:id/ingest` | Ingest text (chunk + embed) |
-| GET | `/sessions/:id/search?q=...` | Semantic search |
-| GET | `/sessions/:id` | Session metadata |
-| DELETE | `/sessions/:id` | Delete session |
-
-### Temp store
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/temp` | List named temp stores (with expiry) |
-| POST | `/temp/:name/ingest` | Ingest into ephemeral named store (2 hr TTL) |
-| GET | `/temp/:name/search?q=...` | Search temp store |
-| GET | `/temp/:name/dump` | Dump all chunks |
-| DELETE | `/temp/:name` | Delete temp store |
-
-### Crypto
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/agent/:id/register` | Register per-agent orthogonal key |
-| POST | `/agent/:id/encrypt` | Encrypt embeddings |
-| POST | `/agent/:id/decrypt` | Decrypt embeddings |
-
-### MCP and agent chat
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/mcp/sse` | MCP over SSE |
-| POST | `/mcp/message` | MCP messages |
-| POST | `/sessions/:id/agent/chat` | Agent loop over a session's memory (uses `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) |
-
-These three routes sit outside the auth gate and the request timeout.
-
-### Health
-
-`GET /health` returns `status`, `version`, `models`, `sessions`, `total_chunks`,
-`uptime_seconds`, `encryption_available`, `inversion_available`, `audio_available`,
-`vision_available` and `gpu` (whether the binary was built with CUDA). Each `models`
-entry is `{"name", "role", "dimension", "status"}`, listed only when loaded:
-
-| `name` | `role` | `dimension` | Present when |
-|--------|--------|-------------|--------------|
-| `gtr-t5-base` | `organize` | 768 | always |
-| `text-embedding-ada-002` | `retrieve` | 1536 | `OPENAI_API_KEY` set (name and dimension are fixed even if `OPENAI_EMBEDDING_MODEL` overrides the model) |
-| `siglip-base-patch16-224` | `multimodal` | 768 | SigLIP vision tower loaded (`/image/embed`) |
-| `siglip-base-patch16-224` | `multimodal-text` | 768 | SigLIP text tower and tokenizer loaded (`/embed`) |
-| `embeddinggemma-2` | `text` | 768 | EmbeddingGemma 2 model and tokenizer loaded (`/embed`) |
-
-Check this list before calling `/embed` with a non-default model.
-
-### Inversion
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/invert` | Reconstruct approximate text from a GTR embedding |
-
-`{"embedding": [...768 floats], "max_length": 64}` returns `{"text", "similarity"}`,
-where `similarity` is the cosine between your vector and the GTR embedding of `text`.
-`max_length` (default 64) bounds the decoded tokens. The inverter is trained on
-GTR-T5-base vectors only; SigLIP, EmbeddingGemma 2 or OpenAI vectors produce
-meaningless text.
-
-Inversion is **approximate, not lossless**. Embedding is many-to-one — many
-different sentences map to nearly the same 768d vector — so a single `/invert`
-call returns text that is *semantically close* to the source but rarely the same
-words. Invert the embedding of "Rust is a systems programming language" and you
-might get back "the Rust language is used for systems programming": same meaning,
-different tokens.
-
-To get closer, **iterate** (vec2text-style correction loop):
-
-1. Start with the target vector `v`.
-2. `/invert` → candidate text `t` and its `similarity` to `v`.
-3. If `similarity` is not close enough, re-embed or adjust `t` and invert again.
-
-Each round nudges the wording so its embedding moves toward `v`; cosine
-similarity climbs and the text stabilizes. The fixed point is text whose
-embedding reproduces the target vector — text and vector have converged, even if
-the final wording still differs from the original. (Requires the inverter models — see the
-`INVERTER_*` env vars; otherwise `/invert` returns `503`.)
-
-### Embed
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/embed` | Batched text vectors (GTR, SigLIP text or EmbeddingGemma 2), no store side effects |
-| POST | `/image/embed` | SigLIP image vector (768d) from `image_base64` |
-| POST | `/audio/embed` | Transcribe `audio_base64`, then embed the transcript (GTR, 768d) |
-| POST | `/audio/transcribe` | Transcript only |
-
-`POST /embed` request fields:
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `texts` | yes | 1–256 strings, each non-blank and at most 32 KiB (UTF-8 bytes) |
-| `model` | no | `gtr-t5-base` (default; same vectors ingest stores), `siglip-base-patch16-224` (same space as `/image/embed`), or `embeddinggemma-2` |
-| `task` | no | `embeddinggemma-2` only. Prompt name whose prefix is prepended to every text (see below). Omitted or blank means no prefix |
-| `dimensions` | no | `embeddinggemma-2` only: `128`, `256`, `512` or `768` (default). Smaller sizes are the leading components re-normalized (Matryoshka) |
-
-The response is `{"model", "dim", "vectors"}`: one L2-normalized vector per text, in
-order, with `dim` the length returned.
-
-`task` names for `embeddinggemma-2`, matched case-insensitively: use `query` for
-search queries and `document` for the passages they search. The others are the
-model's prompt names: `Retrieval-query`, `Retrieval-document`, `Retrieval`,
-`SearchQuery`, `Reranking`, `BitextMining`, `QuestionAnswering`, `FactChecking`,
-`Classification`, `MultilabelClassification`, `Clustering`, `STS`,
-`SentenceSimilarity`, `PairClassification`, `Summarization`, `CodeRetrieval`,
-`InstructionRetrieval`. No prefix matches `SentenceTransformer.encode()` without a
-prompt. EmbeddingGemma 2 input is truncated to 2,048 tokens by default (`EMBEDDINGGEMMA2_MAX_TOKENS`, up to the model's 8,192).
+Wait a few seconds for `/health` to report `"status": "ok"` (first-time ONNX session load can take up to 60 s), then ingest, search, and embed:
 
 ```bash
-# GTR-T5-base (default)
-curl -X POST http://localhost:8080/embed -H "Content-Type: application/json" \
-  -d '{"texts": ["The harbor was quiet at dawn."]}'
+curl -s http://localhost:8080/health
 
-# SigLIP text, comparable with /image/embed vectors
-curl -X POST http://localhost:8080/embed -H "Content-Type: application/json" \
-  -d '{"texts": ["a photo of a sailboat"], "model": "siglip-base-patch16-224"}'
+curl -s -X POST http://localhost:8080/sessions/demo/ingest -H "Content-Type: application/json" \
+  -d '{"text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts."}'
 
-# EmbeddingGemma 2: query and documents with matching tasks, 256d
-curl -X POST http://localhost:8080/embed -H "Content-Type: application/json" \
+curl -s "http://localhost:8080/sessions/demo/search?q=morning+at+the+marina&n=3"
+
+curl -s -X POST http://localhost:8080/embed -H "Content-Type: application/json" \
   -d '{"texts": ["waterproof trail shoes"], "model": "embeddinggemma-2", "task": "query", "dimensions": 256}'
-curl -X POST http://localhost:8080/embed -H "Content-Type: application/json" \
-  -d '{"texts": ["Gore-Tex lined hiking shoe with a lugged sole."], "model": "embeddinggemma-2", "task": "document", "dimensions": 256}'
 ```
 
-Errors are `{"error": "..."}`:
+*(In Windows PowerShell, use `curl.exe` instead of the `curl` alias and escape inner double quotes or pipe a single-quoted JSON string).*
 
-- `400` — unknown `model`; unknown `task`; `dimensions` not in 128/256/512/768;
-  `task` or a non-768 `dimensions` sent with `gtr-t5-base` or
-  `siglip-base-patch16-224`; empty `texts`; more than 256 texts; a blank text; a
-  text over 32 KiB.
-- `503` — `siglip-base-patch16-224` requested but the SigLIP text tower or its
-  tokenizer is not loaded, or `embeddinggemma-2` requested but its model or
-  tokenizer is not loaded. `/health` shows which are loaded.
-- `500` — inference failed. `413` and `408` as in [Request limits](#request-limits).
+That's it. No authentication is required unless `NUTS_AUTH_JWKS_URL` is set, and nothing is written to disk. Note that the CPU `int8` model set includes EmbeddingGemma 2 and GTR-T5-base only, so `/image/embed`, SigLIP `/embed`, and `/invert` return `503` on CPU unless you mount the fp32 models.
 
-Vectors from the three models are in different spaces: compare a vector only with
-vectors from the same model (and, for EmbeddingGemma 2, the same `dimensions`).
-Image, audio and video inputs for EmbeddingGemma 2 are not served yet (see
-`plan/EMBEDDINGGEMMA2_PLAN.md`).
+## Images
 
-### Request limits
+| Image | Tags | Platforms | Models included |
+|---|---|---|---|
+| `deepbluedynamics/shivvr` | `latest`, `X.Y.Z`, `vX.Y.Z` | `linux/amd64` (CUDA 12.6) | Baked in (fp32): EmbeddingGemma 2, GTR-T5-base, SigLIP vision + text, vec2text inverter |
+| `deepbluedynamics/shivvr` | `latest-cpu`, `X.Y.Z-cpu`, `vX.Y.Z-cpu` | `linux/amd64`, `linux/arm64` | None baked in — mount `/models` from `shivvr-models:int8` or local `models/` |
+| `deepbluedynamics/shivvr-models` | `int8` | `linux/amd64`, `linux/arm64` | One-shot volume installer (440 MB `int8`): EmbeddingGemma 2 text + GTR-T5-base |
+| `deepbluedynamics/shivvr-gateway` | `latest`, `X.Y.Z`, `vX.Y.Z` | `linux/amd64` | None — GPU-less front door (landing page, `nuts-auth` check, proxy to backend) |
 
-| Routes | Max body | Notes |
-|--------|----------|-------|
-| `/sessions/:id/ingest`, `/temp/:name/ingest`, `/image/embed`, `/audio/*` | 32 MiB | base64 media payloads |
-| `/embed` | 8 MiB | 256 texts × 32 KiB |
-| everything else | 2 MiB | axum default |
+## Features
 
-Requests over the limit are rejected with `413 Payload Too Large`. Handlers
-that exceed the server timeout (see `SHIVVR_REQUEST_TIMEOUT_SECS`) get `408`.
+Full endpoint schemas, parameters, and examples are in [**docs/API.md**](docs/API.md), and environment variables are in [**docs/CONFIGURATION.md**](docs/CONFIGURATION.md).
 
-### Ingest
+### Embed (`/embed`, `/image/embed`, `/audio/*`)
+`POST /embed` returns batched unit vectors without touching session state: `embeddinggemma-2` (default, 768d or Matryoshka `512`/`256`/`128` with `task` prefixes), `gtr-t5-base` (768d), or `siglip-base-patch16-224` (768d text tower in the same space as `POST /image/embed`). `POST /audio/transcribe` and `POST /audio/embed` transcribe audio via `TRANSCRIPTION_URL`. See [docs/API.md#embed-post-embed-imageembed-audio](docs/API.md#embed-post-embed-imageembed-audio).
+
+### Sessions & search (`/sessions/:id/*`)
+`POST /sessions/:id/ingest` splits text into sentence-bounded chunks and embeds them (`embeddinggemma-2` with its `document` prefix by default, or `gtr-t5-base` when `"model": "gtr-t5-base"` is passed on the first ingest). `GET /sessions/:id/search` runs cosine similarity (`query` prefix on EmbeddingGemma 2), optional BM25 `hybrid=true` or `lexical_only=true`, temporal decay, and FST guardrails. See [docs/API.md#ingest-post-sessionsidingest--post-tempnameingest](docs/API.md#ingest-post-sessionsidingest--post-tempnameingest).
+
+### Temp stores (`/temp/:name/*`)
+Named ephemeral stores with an automatic 2-hour TTL (`/temp`, `/temp/:name/ingest`, `/temp/:name/search`, `/temp/:name/dump`, `DELETE /temp/:name`). Like sessions, a temp store locks in its embedding model on first ingest. See [docs/API.md#temp-store](docs/API.md#temp-store).
+
+### Inversion (`/invert`)
+`POST /invert` reconstructs approximate text from a 768d **`gtr-t5-base`** vector and returns `{"text", "similarity"}`. GTR runs alongside the default model: every text chunk keeps a GTR vector, returned when you ingest with `"return_vectors": ["gtr-t5-base"]`. For new text, call `/embed` with `"model": "gtr-t5-base"`. See [docs/API.md#inversion-post-invert](docs/API.md#inversion-post-invert).
+
+### Encryption (`/agent/:id/*`)
+Register a per-agent orthogonal rotation matrix (`POST /agent/:id/register`) to encrypt chunk embeddings at ingest and query vectors at search time, or call `/agent/:id/encrypt` and `/agent/:id/decrypt` directly. See [docs/API.md#per-agent-encryption-agentid](docs/API.md#per-agent-encryption-agentid).
+
+### MCP & agent chat (`/mcp/*`, `/sessions/:id/agent/chat`)
+Connect any MCP client to `GET /mcp/sse` (`search_memory`, `ingest_memory`, `list_sessions`), or stream turn-based GhostAgent reasoning over a session with `POST /sessions/:id/agent/chat`. See [docs/API.md#mcp-server--ghostagent-chat](docs/API.md#mcp-server--ghostagent-chat).
+
+### Auth (`nuts-auth`)
+Set `NUTS_AUTH_JWKS_URL` to verify RS256 JWTs (`Authorization: Bearer <jwt>`) and API tokens (`Authorization: Bearer ahp_<token>`). Leave it unset for open local development. See [docs/API.md#auth](docs/API.md#auth).
+
+## Architecture
+
+```mermaid
+graph LR
+  subgraph Clients["Clients & Agents"]
+    HTTP["HTTP / curl"]
+    MCP["MCP Client (/mcp/sse)"]
+  end
+  subgraph FrontDoor["Optional Front Door"]
+    GW["shivvr-gateway"]
+  end
+  subgraph Core["shivvr (axum + tokio)"]
+    API["Router & Auth Gate"]
+    Store["Ephemeral Store & TempStore"]
+    Hybrid["Lume (BM25 + FST)"]
+  end
+  subgraph Models["ONNX Runtime (CUDA / CPU)"]
+    Gemma["EmbeddingGemma 2 (default 768d)"]
+    GTR["GTR-T5-base + vec2text Inverter"]
+    SigLIP["SigLIP Vision & Text"]
+  end
+  HTTP --> GW --> API
+  MCP --> API
+  API --> Store & Hybrid
+  API --> Gemma & GTR & SigLIP
+```
+
+## Build from source
+
+Building the Rust binary from source, exporting fp32 ONNX models (`scripts/fetch_models.sh`, `scripts/export_siglip.py`, `scripts/export_embeddinggemma2.py`), and quantizing the `int8` model set (`scripts/quantize_models.py`) are covered in [**docs/BUILDING.md**](docs/BUILDING.md). Maintainers cut a release with `bash scripts/bump-version.sh`, then push the tag (see [**docs/OPERATIONS.md**](docs/OPERATIONS.md)).
+
+## Development
 
 ```bash
-curl -X POST http://localhost:8080/sessions/my-session/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "The harbor was quiet at dawn. Only the sound of halyards against aluminum masts.",
-    "source": "journal",
-    "emotion_primary": "calm"
-  }'
+cargo test --lib --no-default-features          # fast unit tests (no ONNX models needed)
+cargo test --no-default-features --bin gateway  # gateway auth & proxy tests
+cargo test                                      # full unit + integration tests
+python tests/functional.py http://localhost:8080
 ```
 
-Fields: `text`, `source`, `metadata` (any JSON), `emotion_primary`,
-`emotion_secondary`, `agent_id` (encrypt with that agent's keys), `openai_api_key`
-(per-request key for the `retrieve` vector), `mean_pool` (return one pooled vector
-instead of one per chunk), `audio_base64`, `image_base64`. The response is
-`{"chunks_created", "tokens_processed", "time_ms", "chunks"}`.
+### Repository layout
 
-An `image_base64` chunk stores a SigLIP vector in the same session as GTR text
-chunks, and `organize` search scores it against a GTR query vector, so its score is
-not meaningful.
+| Path | Contents |
+|---|---|
+| `src/` | The `shivvr` library and service binary: API router, embedders, chunker, store, crypto, inverter, MCP, GhostAgent |
+| `src/bin/gateway.rs` | Lightweight `shivvr-gateway` front-door binary (landing page, `nuts-auth` verification, Cloud Run proxy) |
+| `scripts/` | Model exporters (`export_embeddinggemma2.py`, `export_gtr_models.py`, `export_siglip.py`), `quantize_models.py`, `bump-version.sh` |
+| `deploy/halos/` | HaLOS Marine container app definition for Raspberry Pi 5 (`docker-compose.yml`, `config.yml`, `metadata.json`) |
+| `tests/` | Rust integration tests (`tests/integration.rs`) and Python end-to-end functional suite (`tests/functional.py`) |
+| `training/` | Standalone Python `vec2text` hypothesis + corrector training pipeline |
+| `plan/` | Active engineering plans (`plan/EMBEDDINGGEMMA2_PLAN.md`) and archived design notes (`plan/archive/`) |
+| `docs/` | [API.md](docs/API.md), [CONFIGURATION.md](docs/CONFIGURATION.md), [BUILDING.md](docs/BUILDING.md), and [OPERATIONS.md](docs/OPERATIONS.md) |
 
-### Search
+## Roadmap
 
-```bash
-# Basic
-curl "http://localhost:8080/sessions/my-session/search?q=morning+at+the+marina&n=5"
-
-# With temporal decay (half-life 24 hours, 30% time weight)
-curl "http://localhost:8080/sessions/my-session/search?q=marina&n=5&time_weight=0.3&decay_halflife_hours=24"
-
-# BM25 + vector rank fusion
-curl "http://localhost:8080/sessions/my-session/search?q=marina&hybrid=true"
-
-# retrieve role (requires OPENAI_API_KEY or openai_api_key)
-curl "http://localhost:8080/sessions/my-session/search?q=marina&role=retrieve"
-```
-
-## Environment
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `8080` | Listen port |
-| `BIND_ADDR` | `127.0.0.1` | Listen address. The Docker images set `0.0.0.0`; set it yourself only to expose a non-Docker run on the network |
-| `MODEL_PATH` | `models/gtr-t5-base.onnx` | GTR-T5-base ONNX embedder (required) |
-| `TOKENIZER_PATH` | `models/tokenizer.json` | GTR tokenizer |
-| `OPENAI_API_KEY` | — | Enables the text-embedding-ada-002 `retrieve` role; also used by agent chat |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-ada-002` | Override OpenAI embedding model |
-| `NUTS_AUTH_JWKS_URL` | — | Enable auth (open dev mode if unset) |
-| `NUTS_AUTH_VALIDATE_URL` | `https://auth.nuts.services/api/validate` | API token validation |
-| `INVERTER_PROJECTION_PATH` | `models/inverter/projection.onnx` | Vec2text projection |
-| `INVERTER_ENCODER_PATH` | `models/inverter/encoder.onnx` | Vec2text T5 encoder |
-| `INVERTER_DECODER_PATH` | `models/inverter/decoder.onnx` | Vec2text T5 decoder |
-| `INVERTER_TOKENIZER_PATH` | `models/inverter/tokenizer.json` | Vec2text tokenizer |
-| `VISION_MODEL_PATH` | `models/siglip-vision.onnx` | SigLIP vision tower (`/image/embed`) |
-| `SIGLIP_TEXT_MODEL_PATH` | `models/siglip-text.onnx` | SigLIP text tower (`/embed` model=siglip-base-patch16-224) |
-| `SIGLIP_TOKENIZER_PATH` | `models/siglip-tokenizer.json` | Fast-tokenizer JSON for the SigLIP text tower |
-| `EMBEDDINGGEMMA2_MODEL_PATH` | `models/embeddinggemma2-text.onnx` | EmbeddingGemma 2 text path (`/embed` model=embeddinggemma-2) |
-| `EMBEDDINGGEMMA2_TOKENIZER_PATH` | `models/embeddinggemma2-tokenizer.json` | Tokenizer JSON for EmbeddingGemma 2 |
-| `EMBEDDINGGEMMA2_MAX_TOKENS` | `2048` | Input token cap for EmbeddingGemma 2 (max 8192). Cost grows faster than linearly: about 5 s per text at 2,048 tokens, and 70-90 s with ~8 GB RSS at 8,192, on CPU |
-| `TRANSCRIPTION_URL` | `http://localhost:8765` | Transcription service for `/audio/*` and `audio_base64` ingest |
-| `GUARDRAILS_DIR` | `guardrails` | Guardrail phrase CSVs for search (a default `offensive.csv` is written if missing) |
-| `ANTHROPIC_API_KEY` | — | Agent chat LLM (preferred over OpenAI when set) |
-| `ANTHROPIC_MODEL` | `claude-3-5-haiku-20241022` | Agent chat model (Anthropic) |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Agent chat model (OpenAI) |
-| `OPENAI_API_URL` | `https://api.openai.com/v1/chat/completions` | Agent chat endpoint (OpenAI-compatible) |
-| `LANDING_ONLY` | unset | `true` serves only the static homepage and a stub `/health`, loading no models |
-| `SHIVVR_ENABLE_RUN_COMMAND` | unset (off) | **Danger.** Exposes the MCP `run_command` tool, which runs arbitrary shell inside the container. Leave unset anywhere the MCP endpoint is reachable by untrusted clients |
-| `SHIVVR_REQUEST_TIMEOUT_SECS` | `120` | Server-side timeout for inference routes (`/embed`, `/image/embed`, `/audio/*`, ingest, `/invert`); other routes use `min(30, this)`. Timed-out requests get `408` with `{"error": ...}` |
-
-## Search query parameters
-
-Same for `/sessions/:id/search` and `/temp/:name/search`.
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `q` | required | Search query text |
-| `n` (alias `limit`) | `5` | Number of results |
-| `role` | `organize` | `organize` (768d GTR) or `retrieve` (1536d OpenAI) |
-| `openai_api_key` | — | Per-request OpenAI key for `retrieve` (sessions only) |
-| `time_weight` | `0.0` | Blend semantic score with recency (0–1) |
-| `decay_halflife_hours` | `168` | Recency decay half-life in hours |
-| `include_nearby` | — | Include temporally adjacent chunks in results |
-| `time_window_minutes` | `30` | Window for nearby chunks |
-| `agent_id` | — | Agent ID for encrypted search |
-| `hybrid` | `false` | Fuse vector and BM25 rankings |
-| `lexical_only` | `false` | BM25 only, no query embedding |
-| `guardrail` | `true` | Reject queries containing blocked guardrail phrases |
-
-## Auth
-
-If `NUTS_AUTH_JWKS_URL` is set, the service enforces nuts-auth. Without a token
-(`Authorization: Bearer <jwt>` or `Authorization: ahp_<token>`) these stay open:
-
-- `GET /`, `GET /health`
-- search with `role=organize` (the default)
-- `/embed`, `/image/embed`, `/audio/*` (local compute only)
-- session and temp ingest, but only when no server `OPENAI_API_KEY` is configured
-
-Everything else behind the gate needs a token, including `role=retrieve` search,
-session metadata and delete, temp list/dump/delete, the crypto routes and `/invert`.
-MCP and agent chat routes are not gated.
-
-Leave `NUTS_AUTH_JWKS_URL` unset for open dev mode.
-
-## Stack
-
-- **Rust** — axum, tokio, ort (ONNX Runtime 2.0)
-- **Embedding** — GTR-T5-base (sentence-transformers), 768d, L2-normalized
-- **Multimodal** — SigLIP base patch16-224 vision and text towers, 768d, one shared space
-- **Text embedding** — EmbeddingGemma 2 text path, 768d with Matryoshka truncation (optional, export not yet verified)
-- **Search** — cosine + BM25 rank fusion and FST guardrails (lume_hybrid)
-- **Storage** — ephemeral `RwLock<HashMap>`, no disk persistence
-- **Inversion** — vec2text gtr-base (projection + T5 encoder/decoder, optional)
-- **Auth** — nuts-auth RS256 JWT + `ahp_` API tokens
-
-## Versioning & releases
-
-`version` in `Cargo.toml` is the single source of truth; `/health` reports it. Every release
-is tagged `v<version>`. `.github/workflows/release.yml` builds the gateway image on tag push to
-`ghcr.io/deepbluedynamics/shivvr-gateway` (and to Docker Hub as `deepbluedynamics/shivvr-gateway`
-when the repo has `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets), and refuses a tag that does not
-match `Cargo.toml`. The same workflow builds the CPU image for amd64 and arm64 on native runners
-and publishes one multi-arch manifest with `-cpu` tags. The CUDA app image is built on Cloud Build by `deploy.sh` as
-`gcr.io/gnosis-459403/shivvr:v<version>`. Full procedure: [OPERATIONS.md](OPERATIONS.md#versioning--releases).
+- **EmbeddingGemma 2 image and audio encoders:** native image (`/image/embed`) and direct audio (`/audio/embed`) soft-token pipelines (`plan/EMBEDDINGGEMMA2_PLAN.md`, WP3 & WP4).
+- **In-domain retrieval benchmarks & fine-tuning:** evaluation harness across Matryoshka dimensions (`768`/`256`/`128`) and `int8` vs `fp32` on marine and agent corpora.
+- **HaLOS Raspberry Pi 5 packaging:** on-device latency/thermal benchmarks and submission of `deploy/halos/shivvr` to `halos-marine-containers`.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+[BSD 3-Clause](LICENSE). Copyright © 2026 DeepBlue Dynamics LLC.
+
+## Credits
+
+Built by [DeepBlue Dynamics](https://github.com/deepbluedynamics/) on top of [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) and [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) (Google), [GTR-T5-base](https://huggingface.co/sentence-transformers/gtr-t5-base) (Sentence Transformers), [vec2text](https://github.com/jxmorris12/vec2text) (Morris et al.), and [ONNX Runtime](https://onnxruntime.ai/) via [`ort`](https://ort.pyke.io/).

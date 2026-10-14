@@ -5,7 +5,7 @@ name = "shivvr"
 # Single source of truth for the shivvr version. Bump here only.
 # Health endpoint, homepage header, and MCP serverInfo all read this via
 # env!("CARGO_PKG_VERSION"). No other file references the version string.
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 
 [features]
@@ -50,7 +50,9 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-lume-hybrid = { path = "vendor/lume-hybrid" }
+# FST tagger (query guardrails) and BM25 for hybrid/lexical search. Default
+# features only: `ti` pulls in the whole Lume TI workspace.
+lume = { git = "https://github.com/DeepBlueDynamics/lume", tag = "v0.16.0", default-features = false }
 
 [package.metadata.dist]
 dist = false

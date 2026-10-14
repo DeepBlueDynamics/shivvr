@@ -92,7 +92,8 @@ SENTENCES = [
 embeddings = {}
 
 for sentence in SENTENCES:
-    status, resp = req("POST", f"/sessions/{SESSION}/ingest", {"text": sentence})
+    # GTR session: the inversion tests below need GTR vectors.
+    status, resp = req("POST", f"/sessions/{SESSION}/ingest", {"text": sentence, "model": "gtr-t5-base"})
     ok = status == 200 and resp.get("chunks_created", 0) == 1
     check(f"ingest: '{sentence[:40]}...' " if len(sentence) > 40 else f"ingest: '{sentence}'", ok,
           f"chunks={resp.get('chunks_created')}")
@@ -166,6 +167,47 @@ if status1 == 200 and status2 == 200:
     e2 = r2["chunks"][0]["embedding"]
     sim = cosine(e1, e2)
     check("same text -> same embedding (cosine >= 0.9999)", sim >= 0.9999, f"cosine={sim:.6f}")
+
+# -- 6b. Per-store text model ─────────────────────────────────────────────────
+section("Per-store text model")
+_, health = req("GET", "/health")
+default_model = health.get("default_model")
+check("/health reports default_model", default_model in ("embeddinggemma-2", "gtr-t5-base"),
+      f"default_model={default_model}")
+
+model_session = SESSION + "-model"
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "The harbor was quiet at dawn."})
+check("ingest without model uses the default", status == 200 and r.get("model") == default_model,
+      f"status={status} model={r.get('model')}")
+other = "gtr-t5-base" if default_model == "embeddinggemma-2" else "embeddinggemma-2"
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "Halyards slap the masts.", "model": other})
+check("ingest naming another model -> 400", status == 400, f"status={status}")
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "Gulls circle the breakwater."})
+check("later ingest without model keeps the session's model", status == 200 and r.get("model") == default_model,
+      f"status={status} model={r.get('model')}")
+status, r = req("GET", f"/sessions/{model_session}/search?q=morning+harbor&n=1")
+check("search uses the session's model", status == 200 and bool(r.get("results")), f"status={status}")
+status, r = req("GET", f"/sessions/{model_session}/search?q=harbor&model={other}")
+check("search expecting another model -> 400", status == 400, f"status={status}")
+status, r = req("POST", "/invert", {"embedding": [0.0] * 768, "model": "embeddinggemma-2"})
+check("/invert rejects non-GTR model -> 400", status == 400, f"status={status}")
+
+# GTR runs alongside: the GTR vector comes back only when requested.
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "A ketch rounded the point at noon."})
+check("no return_vectors -> no embeddings map", status == 200 and "embeddings" not in r["chunks"][0],
+      f"keys={list(r['chunks'][0].keys()) if status == 200 else status}")
+status, r = req("POST", f"/sessions/{model_session}/ingest",
+                {"text": "A ketch rounded the point at noon.", "return_vectors": ["gtr-t5-base"]})
+gtr_vec = (r.get("chunks") or [{}])[0].get("embeddings", {}).get("gtr-t5-base") if status == 200 else None
+check("return_vectors gtr-t5-base -> 768d GTR vector", gtr_vec is not None and len(gtr_vec) == 768,
+      f"status={status}")
+if gtr_vec and inversion_up:
+    status, inv = req("POST", "/invert", {"embedding": gtr_vec, "model": "gtr-t5-base", "max_length": 32})
+    check("GTR vector from a default-model session inverts", status == 200 and inv.get("similarity", 0) > 0.5,
+          f"status={status} similarity={inv.get('similarity')}")
+status, r = req("POST", f"/sessions/{model_session}/ingest", {"text": "x.", "return_vectors": ["siglip"]})
+check("unknown return_vectors entry -> 400", status == 400, f"status={status}")
+req("DELETE", f"/sessions/{model_session}")
 
 # ── 7. EmbeddingGemma 2 (/embed) ──────────────────────────────────────────────
 section("EmbeddingGemma 2 (/embed)")

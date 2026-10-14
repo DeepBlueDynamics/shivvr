@@ -34,14 +34,17 @@ pub struct AppState {
     /// EmbeddingGemma 2 text path; `None` when the ONNX or tokenizer file is
     /// missing.
     pub embeddinggemma2: Option<Arc<crate::embeddinggemma::EmbeddingGemma2Embedder>>,
+    /// Text models for sessions, temp stores, search, MCP and the agent
+    /// (EmbeddingGemma 2 by default, GTR-T5-base selectable).
+    pub text_models: Arc<crate::text_model::TextEmbedders>,
     pub start_time: std::time::Instant,
     pub nuts_auth: Option<Arc<NutsAuth>>,
     pub openai_auth_required: bool,
-    pub guardrail_tagger: Arc<std::sync::RwLock<lume_hybrid::Tagger>>,
+    pub guardrail_tagger: Arc<std::sync::RwLock<lume::Tagger>>,
     /// BM25 tuning params (k1/b/delta/title_weight/body_weight). Lume's
     /// successor to the old SearchConfig — variant + tagger get selected
     /// per call rather than living on the global config.
-    pub search_params: lume_hybrid::bm25::Bm25Params,
+    pub search_params: lume::bm25::Bm25Params,
     pub mcp_connections: Arc<tokio::sync::RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Result<axum::response::sse::Event, std::convert::Infallible>>>>>,
 }
 
@@ -71,6 +74,16 @@ pub struct IngestRequest {
     pub audio_base64: Option<String>,
     /// Base64 encoded image to embed via SigLIP vision model
     pub image_base64: Option<String>,
+    /// Text model for this session or temp store: `embeddinggemma-2` (the
+    /// default) or `gtr-t5-base`. Fixed on the first ingest; omit it on later
+    /// ingests to use the store's model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Extra vectors to return per chunk, by model name. Today only
+    /// `"gtr-t5-base"` (the invertible vector kept alongside the search
+    /// vector). Returned under each chunk's `embeddings` map.
+    #[serde(default)]
+    pub return_vectors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -78,6 +91,8 @@ pub struct IngestResponse {
     pub chunks_created: usize,
     pub tokens_processed: usize,
     pub time_ms: u64,
+    /// Text model that produced the chunk embeddings.
+    pub model: String,
     pub chunks: Vec<IngestChunk>,
 }
 
@@ -88,6 +103,9 @@ pub struct IngestChunk {
     pub embedding: Vec<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_retrieve: Option<Vec<f32>>,
+    /// Vectors requested with `return_vectors`, keyed by model name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embeddings: Option<std::collections::HashMap<String, Vec<f32>>>,
     pub token_count: usize,
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,9 +132,14 @@ pub struct SearchQuery {
     pub include_nearby: Option<bool>,
     #[serde(default = "default_time_window")]
     pub time_window_minutes: i64,
-    /// Embedding role: "organize" (768d gtr-t5-base) or "retrieve" (1536d ada-002)
+    /// Embedding role: "organize" (768d, the store's text model) or "retrieve" (1536d ada-002)
     #[serde(default = "default_role")]
     pub role: String,
+    /// Optional check: the text model the caller expects the store to hold.
+    /// The query is always embedded with the store's own model; a different
+    /// value here is a 400.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Agent ID for encrypted search
     pub agent_id: Option<String>,
     /// Caller-supplied OpenAI API key — enables retrieve role without server key
@@ -241,6 +264,9 @@ pub struct ModelInfo {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    /// Text model used when a request names none (`/embed`, new sessions and
+    /// temp stores): `embeddinggemma-2` when loaded, else `gtr-t5-base`.
+    pub default_model: String,
     pub models: Vec<ModelInfo>,
     pub sessions: usize,
     pub total_chunks: usize,
@@ -260,6 +286,10 @@ pub struct ErrorResponse {
 #[derive(Deserialize)]
 pub struct AudioRequest {
     pub audio_base64: String,
+    /// `/audio/embed` only: text model for the transcript
+    /// (`embeddinggemma-2` by default, or `gtr-t5-base`).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -272,6 +302,7 @@ pub struct AudioEmbedResponse {
     pub transcript: String,
     pub embedding: Vec<f32>,
     pub dimension: usize,
+    pub model: String,
 }
 
 #[derive(Deserialize)]
@@ -287,6 +318,136 @@ pub struct ImageEmbedResponse {
 }
 
 
+// ===== Text model helpers =====
+
+type ApiError = (StatusCode, Json<ErrorResponse>);
+
+fn api_error(status: StatusCode, error: impl Into<String>) -> ApiError {
+    (status, Json(ErrorResponse { error: error.into() }))
+}
+
+fn resolve_error(e: crate::text_model::ResolveError) -> ApiError {
+    let status = match e {
+        crate::text_model::ResolveError::Unknown(_) => StatusCode::BAD_REQUEST,
+        crate::text_model::ResolveError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    api_error(status, e.to_string())
+}
+
+/// Text model for an ingest into a store that may already have one: the
+/// requested model, else the store's, else the server default. Naming a
+/// different model than the store holds is a 400.
+fn ingest_model(state: &AppState, requested: Option<&str>, existing: Option<String>) -> Result<&'static str, ApiError> {
+    let requested = requested.map(str::trim).filter(|m| !m.is_empty());
+    let model = state
+        .text_models
+        .resolve(requested.or(existing.as_deref()))
+        .map_err(resolve_error)?;
+    if let Some(existing) = existing {
+        if existing != model {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                crate::store::ModelMismatch { store_model: existing, requested: model.to_string() }.to_string(),
+            ));
+        }
+    }
+    Ok(model)
+}
+
+/// Text model for a search over a store: the store's model (or the server
+/// default when the store doesn't exist). `expected` is the optional `model`
+/// query parameter; a mismatch is a 400.
+fn search_model(state: &AppState, expected: Option<&str>, existing: Option<String>) -> Result<&'static str, ApiError> {
+    let expected = expected.map(str::trim).filter(|m| !m.is_empty());
+    let model = state
+        .text_models
+        .resolve(existing.as_deref().or(expected))
+        .map_err(resolve_error)?;
+    if let Some(expected) = expected {
+        if expected != model {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("this store holds {model} vectors, not {expected}"),
+            ));
+        }
+    }
+    Ok(model)
+}
+
+/// Re-embed chunk texts with `model` (`document` prefix). The chunker already
+/// embedded them with GTR-T5-base, so GTR needs no second pass; for any other
+/// model the GTR vector moves to `embedding_gtr` so the chunk stays invertible.
+async fn embed_chunks(state: &AppState, model: &'static str, chunks: &mut [crate::store::Chunk]) -> Result<(), ApiError> {
+    if model == crate::embed_api::EMBED_MODEL || chunks.is_empty() {
+        return Ok(());
+    }
+    let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    let models = state.text_models.clone();
+    let vectors = tokio::task::spawn_blocking(move || {
+        texts
+            .iter()
+            .map(|t| models.embed(model, crate::text_model::Purpose::Document, t))
+            .collect::<anyhow::Result<Vec<Vec<f32>>>>()
+    })
+    .await
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding task failed: {e}")))?
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Embedding failed: {e}")))?;
+    for (chunk, vector) in chunks.iter_mut().zip(vectors) {
+        chunk.embedding_gtr = Some(std::mem::replace(&mut chunk.embedding, vector));
+    }
+    Ok(())
+}
+
+/// Parse an ingest's `return_vectors`. Only `gtr-t5-base` can be requested
+/// today (the store's own vector is always returned as `embedding`).
+fn parse_return_vectors(names: &[String]) -> Result<bool, ApiError> {
+    let mut gtr = false;
+    for name in names {
+        match name.trim() {
+            crate::embed_api::EMBED_MODEL => gtr = true,
+            other => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unsupported return_vectors entry {other:?}; available: [{:?}]",
+                        crate::embed_api::EMBED_MODEL
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(gtr)
+}
+
+/// The `embeddings` map for an ingest response chunk: the GTR vector when
+/// requested (the stored one, or `embedding` itself for GTR stores).
+fn extra_vectors(
+    want_gtr: bool,
+    store_model: &str,
+    embedding: &[f32],
+    embedding_gtr: Option<&Vec<f32>>,
+) -> Option<std::collections::HashMap<String, Vec<f32>>> {
+    if !want_gtr {
+        return None;
+    }
+    let gtr = match embedding_gtr {
+        Some(v) => v.clone(),
+        None if store_model == crate::embed_api::EMBED_MODEL => embedding.to_vec(),
+        None => return None,
+    };
+    Some(std::collections::HashMap::from([(crate::embed_api::EMBED_MODEL.to_string(), gtr)]))
+}
+
+/// Embed a search query with `model` (`query` prefix).
+async fn embed_query(state: &AppState, model: &'static str, q: &str) -> Result<Vec<f32>, ApiError> {
+    let models = state.text_models.clone();
+    let q = q.to_string();
+    tokio::task::spawn_blocking(move || models.embed(model, crate::text_model::Purpose::Query, &q))
+        .await
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding task failed: {e}")))?
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 // ===== Handlers =====
 
 pub async fn ingest(
@@ -300,6 +461,8 @@ pub async fn ingest(
         return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "session not found".to_string() })));
     }
     let start = std::time::Instant::now();
+    let model = ingest_model(&state, req.model.as_deref(), state.store.session_model(&session_id))?;
+    let want_gtr = parse_return_vectors(&req.return_vectors)?;
 
     let emotion_primary = req.emotion_primary.clone();
     let emotion_secondary = req.emotion_secondary.clone();
@@ -355,6 +518,7 @@ pub async fn ingest(
     } else {
         Vec::new()
     };
+    embed_chunks(&state, model, &mut chunks).await?;
 
     // 2. Process image if image_base64 provided
     if let Some(ref img_b64) = req.image_base64 {
@@ -392,6 +556,7 @@ pub async fn ingest(
             text: img_text,
             embedding: img_emb,
             embedding_retrieve: None,
+            embedding_gtr: None,
             token_count: 1,
             source: Some("image".to_string()),
             metadata: req.metadata.clone(),
@@ -439,6 +604,9 @@ pub async fn ingest(
         if let Some(keys) = state.crypto.get_keys(aid) {
             for chunk in &mut chunks {
                 chunk.embedding = keys.encrypt(&chunk.embedding, "organize");
+                if let Some(ref emb) = chunk.embedding_gtr {
+                    chunk.embedding_gtr = Some(keys.encrypt(emb, "organize"));
+                }
                 if let Some(ref emb) = chunk.embedding_retrieve {
                     chunk.embedding_retrieve = Some(keys.encrypt(emb, "retrieve"));
                 }
@@ -457,6 +625,12 @@ pub async fn ingest(
             text: c.text.clone(),
             embedding: c.embedding.clone(),
             embedding_retrieve: c.embedding_retrieve.clone(),
+            // Image chunks hold a SigLIP vector and have no GTR vector.
+            embeddings: if c.id.starts_with("img_") {
+                None
+            } else {
+                extra_vectors(want_gtr, model, &c.embedding, c.embedding_gtr.as_ref())
+            },
             token_count: c.token_count,
             source: c.source.clone(),
             emotion_primary: c.emotion_primary.clone(),
@@ -464,6 +638,10 @@ pub async fn ingest(
         })
         .collect();
 
+    state
+        .store
+        .claim_model(&session_id, model, caller_id)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e.to_string()))?;
     state.store.add_chunks(&session_id, chunks, caller_id).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -477,6 +655,7 @@ pub async fn ingest(
         chunks_created,
         tokens_processed,
         time_ms: start.elapsed().as_millis() as u64,
+        model: model.to_string(),
         chunks: response_chunks,
     }))
 }
@@ -487,6 +666,8 @@ pub async fn temp_ingest(
     Json(req): Json<IngestRequest>,
 ) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
     let start = std::time::Instant::now();
+    let model = ingest_model(&state, req.model.as_deref(), state.temp_store.store_model(&name))?;
+    let want_gtr = parse_return_vectors(&req.return_vectors)?;
 
     let emotion_primary = req.emotion_primary.clone();
     let emotion_secondary = req.emotion_secondary.clone();
@@ -504,6 +685,7 @@ pub async fn temp_ingest(
                 }),
             )
         })?;
+    embed_chunks(&state, model, &mut chunks).await?;
 
     let openai_for_request = req.openai_api_key
         .as_deref()
@@ -538,6 +720,9 @@ pub async fn temp_ingest(
         if let Some(keys) = state.crypto.get_keys(aid) {
             for chunk in &mut chunks {
                 chunk.embedding = keys.encrypt(&chunk.embedding, "organize");
+                if let Some(ref emb) = chunk.embedding_gtr {
+                    chunk.embedding_gtr = Some(keys.encrypt(emb, "organize"));
+                }
                 if let Some(ref emb) = chunk.embedding_retrieve {
                     chunk.embedding_retrieve = Some(keys.encrypt(emb, "retrieve"));
                 }
@@ -579,11 +764,40 @@ pub async fn temp_ingest(
             None
         };
 
+        // Pooled GTR vector, when requested: mean of each chunk's GTR vector
+        // (the stored one, or `embedding` itself in a GTR store).
+        let pooled_gtr = if want_gtr {
+            let vectors: Vec<&[f32]> = chunks
+                .iter()
+                .filter_map(|c| match &c.embedding_gtr {
+                    Some(v) => Some(v.as_slice()),
+                    None if model == crate::embed_api::EMBED_MODEL => Some(c.embedding.as_slice()),
+                    None => None,
+                })
+                .collect();
+            if vectors.len() == chunks.len() {
+                let mut gp = vec![0.0f32; vectors[0].len()];
+                for v in &vectors {
+                    for (p, x) in gp.iter_mut().zip(v.iter()) {
+                        *p += x;
+                    }
+                }
+                let gnorm = gp.iter().map(|v| v * v).sum::<f32>().sqrt();
+                if gnorm > 0.0 { for p in &mut gp { *p /= gnorm; } }
+                Some(std::collections::HashMap::from([(crate::embed_api::EMBED_MODEL.to_string(), gp)]))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         vec![IngestChunk {
             chunk_id: chunks[0].id.clone(),
             text: req.text.clone(),
             embedding: pooled,
             embedding_retrieve: pooled_retrieve,
+            embeddings: pooled_gtr,
             token_count: tokens_processed,
             source: chunks[0].source.clone(),
             emotion_primary: emotion_primary.clone(),
@@ -597,6 +811,7 @@ pub async fn temp_ingest(
                 text: c.text.clone(),
                 embedding: c.embedding.clone(),
                 embedding_retrieve: c.embedding_retrieve.clone(),
+                embeddings: extra_vectors(want_gtr, model, &c.embedding, c.embedding_gtr.as_ref()),
                 token_count: c.token_count,
                 source: c.source.clone(),
                 emotion_primary: c.emotion_primary.clone(),
@@ -605,6 +820,10 @@ pub async fn temp_ingest(
             .collect()
     };
 
+    state
+        .temp_store
+        .claim_model(&name, model)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e.to_string()))?;
     state.temp_store.add_chunks(&name, chunks).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -618,6 +837,7 @@ pub async fn temp_ingest(
         chunks_created,
         tokens_processed,
         time_ms: start.elapsed().as_millis() as u64,
+        model: model.to_string(),
         chunks: response_chunks,
     }))
 }
@@ -635,6 +855,7 @@ pub async fn search(
     if !state.store.caller_owns_session(&session_id, caller_id) {
         return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "session not found".to_string() })));
     }
+    let model = search_model(&state, query.model.as_deref(), state.store.session_model(&session_id))?;
 
     // 1. Run FST Tagger Guardrail
     let tags = state.guardrail_tagger.read().unwrap().tag(&query.q);
@@ -687,14 +908,7 @@ pub async fn search(
                 )
             })?
         } else {
-            state.embedder.embed(&query.q).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?
+            embed_query(&state, model, &query.q).await?
         };
 
         if let Some(ref aid) = query.agent_id {
@@ -832,6 +1046,7 @@ pub async fn temp_search(
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
     let start = std::time::Instant::now();
     let role = &query.role;
+    let model = search_model(&state, query.model.as_deref(), state.temp_store.store_model(&name))?;
 
     // 1. Run FST Tagger Guardrail
     let tags = state.guardrail_tagger.read().unwrap().tag(&query.q);
@@ -875,14 +1090,7 @@ pub async fn temp_search(
                 )
             })?
         } else {
-            state.embedder.embed(&query.q).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?
+            embed_query(&state, model, &query.q).await?
         };
 
         if let Some(ref aid) = query.agent_id {
@@ -1206,6 +1414,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        default_model: state.text_models.default_model().to_string(),
         models,
         sessions: sessions.len(),
         total_chunks,
@@ -1340,6 +1549,10 @@ pub struct InvertRequest {
     pub embedding: Vec<f32>,
     #[serde(default = "default_role")]
     pub role: String,
+    /// Model that produced `embedding`. Only `gtr-t5-base` can be inverted;
+    /// naming another model is a 400. Omitted = assumed GTR.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Maximum tokens to generate (default 64)
     #[serde(default = "default_max_length")]
     pub max_length: usize,
@@ -1355,6 +1568,18 @@ pub async fn invert(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InvertRequest>,
 ) -> Result<Json<InvertResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(model) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        if model != crate::embed_api::EMBED_MODEL {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "/invert only reconstructs {} vectors, not {model}; ingest with \"model\": \"{}\" to get invertible vectors",
+                    crate::embed_api::EMBED_MODEL,
+                    crate::embed_api::EMBED_MODEL
+                ),
+            ));
+        }
+    }
     let inverter = state.inverter.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2336,20 +2561,22 @@ pub async fn audio_embed_handler(
         )
     })?;
 
-    let embedding = state.embedder.embed(&transcript).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Embedding failed: {}", e),
-            }),
-        )
-    })?;
+    let model = state.text_models.resolve(req.model.as_deref()).map_err(resolve_error)?;
+    let models = state.text_models.clone();
+    let text = transcript.clone();
+    let embedding = tokio::task::spawn_blocking(move || {
+        models.embed(model, crate::text_model::Purpose::Document, &text)
+    })
+    .await
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding task failed: {e}")))?
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Embedding failed: {e}")))?;
 
     let dimension = embedding.len();
     Ok(Json(AudioEmbedResponse {
         transcript,
         embedding,
         dimension,
+        model: model.to_string(),
     }))
 }
 
@@ -2399,21 +2626,26 @@ pub async fn image_embed_handler(
 
 /// `POST /embed`: vectors for a batch of texts. No session, store, or cache
 /// side effects. `model` picks the space:
-/// - `gtr-t5-base` (default): the vector the ingest paths store in
-///   `Chunk::embedding`. Texts are embedded one at a time inside a single
+/// - `embeddinggemma-2` (default): EmbeddingGemma 2's text path. `task`
+///   prepends the matching prompt prefix and `dimensions` truncates
+///   (Matryoshka) and re-normalizes. 503 when named but not loaded; with no
+///   `model`, `task` or `dimensions` and EmbeddingGemma 2 not loaded, the
+///   request falls back to `gtr-t5-base`.
+/// - `gtr-t5-base`: texts are embedded one at a time inside a single
 ///   blocking task: the embedder mean-pools without a padding mask, so padded
-///   batch inference would change the vectors.
+///   batch inference would change the vectors. The only space `/invert` reads.
 /// - `siglip-base-patch16-224`: the SigLIP text tower, same space as
 ///   `POST /image/embed`, for text-to-image comparison. 503 when the tower or
 ///   its tokenizer is not loaded.
-/// - `embeddinggemma-2`: EmbeddingGemma 2's text path. `task` prepends the
-///   matching prompt prefix and `dimensions` truncates (Matryoshka) and
-///   re-normalizes. 503 when the model or its tokenizer is not loaded.
 pub async fn embed_texts(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<crate::embed_api::EmbedRequest>,
+    Json(mut req): Json<crate::embed_api::EmbedRequest>,
 ) -> Result<Json<crate::embed_api::EmbedResponse>, (StatusCode, Json<ErrorResponse>)> {
     use crate::embed_api::{truncate_normalize, validate, EmbedModel, EmbedResponse};
+    let unspecified = req.model.as_deref().map(str::trim).unwrap_or("").is_empty();
+    if unspecified && state.embeddinggemma2.is_none() && req.task.is_none() && req.dimensions.is_none() {
+        req.model = Some(crate::embed_api::EMBED_MODEL.to_string());
+    }
     let plan = validate(&req).map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     let model = plan.model;
     let texts = req.texts;
@@ -2620,7 +2852,7 @@ pub async fn agent_chat(
         state.store.clone(),
         state.temp_store.clone(),
         state.chunker.clone(),
-        state.embedder.clone(),
+        state.text_models.clone(),
     );
 
     tokio::spawn(async move {
@@ -2834,7 +3066,12 @@ async fn process_mcp_request(
                     let query_embedding = if lexical_only {
                         None
                     } else {
-                        state.embedder.embed(query).ok()
+                        let model = state
+                            .store
+                            .session_model(session_id)
+                            .and_then(|m| state.text_models.resolve(Some(&m)).ok())
+                            .unwrap_or_else(|| state.text_models.default_model());
+                        embed_query(&state, model, query).await.ok()
                     };
 
                     match state.store.search_hybrid(
@@ -2869,19 +3106,26 @@ async fn process_mcp_request(
                     let text = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     let source = arguments.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-                    match state.chunker.chunk(text, source, serde_json::Value::Null).await {
-                        Ok(chunks) => {
-                            if chunks.is_empty() {
-                                "Success: Text was too short or no chunks produced.".to_string()
-                            } else {
-                                let first_id = chunks[0].id.clone();
-                                match state.store.add_chunks(session_id, chunks, None) {
-                                    Ok(_) => format!("Success: Memory chunk indexed under ID {}", first_id),
-                                    Err(e) => format!("Error indexing chunk in store: {}", e),
+                    match ingest_model(&state, None, state.store.session_model(session_id)) {
+                        Err((_, Json(e))) => format!("Error: {}", e.error),
+                        Ok(model) => match state.chunker.chunk(text, source, serde_json::Value::Null).await {
+                            Ok(mut chunks) => {
+                                if chunks.is_empty() {
+                                    "Success: Text was too short or no chunks produced.".to_string()
+                                } else if let Err((_, Json(e))) = embed_chunks(&state, model, &mut chunks).await {
+                                    format!("Error embedding chunks: {}", e.error)
+                                } else if let Err(e) = state.store.claim_model(session_id, model, None) {
+                                    format!("Error: {}", e)
+                                } else {
+                                    let first_id = chunks[0].id.clone();
+                                    match state.store.add_chunks(session_id, chunks, None) {
+                                        Ok(_) => format!("Success: Memory chunk indexed under ID {}", first_id),
+                                        Err(e) => format!("Error indexing chunk in store: {}", e),
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => format!("Error chunking text: {}", e),
+                            Err(e) => format!("Error chunking text: {}", e),
+                        },
                     }
                 }
                 "list_sessions" => {

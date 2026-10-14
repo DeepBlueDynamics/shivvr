@@ -9,11 +9,17 @@ use std::sync::RwLock;
 pub struct Chunk {
     pub id: String,
     pub text: String,
-    /// Organize embedding (768d, gtr-t5-base)
+    /// Organize embedding (768d), from the session's text model
+    /// (`embeddinggemma-2` by default, or `gtr-t5-base`)
     pub embedding: Vec<f32>,
     /// Retrieve embedding (1536d, ada-002) — optional
     #[serde(default)]
     pub embedding_retrieve: Option<Vec<f32>>,
+    /// GTR-T5-base vector (768d) kept alongside `embedding` when the session
+    /// uses another text model, so the chunk stays invertible. `None` for GTR
+    /// sessions (where `embedding` is already GTR) and image chunks.
+    #[serde(default)]
+    pub embedding_gtr: Option<Vec<f32>>,
     pub token_count: usize,
     pub source: Option<String>,
     pub metadata: serde_json::Value,
@@ -38,14 +44,39 @@ pub struct SessionMeta {
     pub last_ingested: DateTime<Utc>,
     pub chunk_count: usize,
     pub total_tokens: usize,
+    /// Text model that produced this session's organize vectors.
+    pub model: String,
 }
+
+/// An ingest named a different text model than the one the session or temp
+/// store was created with. Vectors from different models are not comparable,
+/// so the ingest is refused.
+#[derive(Debug)]
+pub struct ModelMismatch {
+    pub store_model: String,
+    pub requested: String,
+}
+
+impl std::fmt::Display for ModelMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this store holds {} vectors; cannot add {} vectors (use a new session for another model)",
+            self.store_model, self.requested
+        )
+    }
+}
+
+impl std::error::Error for ModelMismatch {}
 
 struct Session {
     chunks: Vec<Chunk>,
-    bm25_index: Option<lume_hybrid::bm25::Bm25Index>,
+    bm25_index: Option<lume::bm25::Bm25Index>,
     created_at: DateTime<Utc>,
     last_ingested: DateTime<Utc>,
     total_tokens: usize,
+    /// Text model fixed on creation (first ingest).
+    model: String,
     /// Identity of the caller who created this session (user_id from auth claims).
     /// None = created in open dev mode (no auth) — accessible to anyone.
     owner: Option<String>,
@@ -63,8 +94,36 @@ impl Store {
         }
     }
 
+    /// Fix a session's text model before ingesting into it: creates the
+    /// session (with `owner`) if it doesn't exist, records `model` if none is
+    /// set yet, and fails with [`ModelMismatch`] if it holds another model.
+    pub fn claim_model(&self, session_id: &str, model: &str, owner: Option<&str>) -> std::result::Result<(), ModelMismatch> {
+        let now = Utc::now();
+        let mut sessions = self.sessions.write().unwrap();
+        let session = sessions.entry(session_id.to_string()).or_insert_with(|| Session {
+            chunks: Vec::new(),
+            bm25_index: None,
+            created_at: now,
+            last_ingested: now,
+            total_tokens: 0,
+            model: String::new(),
+            owner: owner.map(|s| s.to_string()),
+        });
+        if session.model.is_empty() {
+            session.model = model.to_string();
+        }
+        if session.model != model {
+            return Err(ModelMismatch {
+                store_model: session.model.clone(),
+                requested: model.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Add chunks to a session (creates session if it doesn't exist).
     /// `owner` is set only on creation — subsequent ingests don't change it.
+    /// Call [`Store::claim_model`] first so the session records its model.
     pub fn add_chunks(&self, session_id: &str, chunks: Vec<Chunk>, owner: Option<&str>) -> Result<()> {
         let tokens: usize = chunks.iter().map(|c| c.token_count).sum();
         let now = Utc::now();
@@ -76,6 +135,7 @@ impl Store {
             created_at: now,
             last_ingested: now,
             total_tokens: 0,
+            model: String::new(),
             owner: owner.map(|s| s.to_string()),
         });
 
@@ -88,8 +148,8 @@ impl Store {
         // don't use here — zero them out. Bm25Index::build takes Option<&Tagger>
         // for FST intent-boosting; we don't use that path in the BM25-only flow,
         // so pass None.
-        let sections: Vec<lume_hybrid::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
-            lume_hybrid::bm25::Section {
+        let sections: Vec<lume::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
+            lume::bm25::Section {
                 title: c.source.clone().unwrap_or_else(|| c.id.clone()),
                 body: c.text.clone(),
                 line_number: i,
@@ -97,7 +157,7 @@ impl Store {
                 entities: Vec::new(),
             }
         }).collect();
-        session.bm25_index = Some(lume_hybrid::bm25::Bm25Index::build(sections, None));
+        session.bm25_index = Some(lume::bm25::Bm25Index::build(sections, None));
 
         Ok(())
     }
@@ -114,6 +174,16 @@ impl Store {
                 (Some(o), Some(c)) => o == c,
             },
         }
+    }
+
+    /// The text model a session was created with, or `None` if the session
+    /// doesn't exist or has no model recorded yet.
+    pub fn session_model(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .get(session_id)
+            .map(|s| s.model.clone())
+            .filter(|m| !m.is_empty())
     }
 
     /// Get all chunks for a session
@@ -134,6 +204,7 @@ impl Store {
             last_ingested: s.last_ingested,
             chunk_count: s.chunks.len(),
             total_tokens: s.total_tokens,
+            model: s.model.clone(),
         }))
     }
 
@@ -165,6 +236,7 @@ impl Store {
                 last_ingested: s.last_ingested,
                 chunk_count: s.chunks.len(),
                 total_tokens: s.total_tokens,
+                model: s.model.clone(),
             })
             .collect())
     }
@@ -241,8 +313,8 @@ impl Store {
         time_weight: Option<f32>,
         decay_halflife_hours: f32,
         role: &str,
-        tags: &[lume_hybrid::Tag],
-        _params: &lume_hybrid::bm25::Bm25Params,
+        tags: &[lume::Tag],
+        _params: &lume::bm25::Bm25Params,
     ) -> Result<Vec<(Chunk, f32)>> {
         let chunks = self.get_chunks(session_id)?;
         if chunks.is_empty() {
@@ -282,7 +354,7 @@ impl Store {
                 // internals of rust-hybrid-search.
                 let hits = idx.search(
                     query,
-                    lume_hybrid::bm25::SearchVariant::Classic,
+                    lume::bm25::SearchVariant::Classic,
                     _params,
                     None,
                 );
@@ -402,6 +474,7 @@ mod tests {
             text: format!("text for {}", id),
             embedding,
             embedding_retrieve: retrieve,
+            embedding_gtr: None,
             token_count: 10,
             source: Some("test".to_string()),
             metadata: serde_json::json!({}),
@@ -431,6 +504,7 @@ mod tests {
             text: "hello world".to_string(),
             embedding: vec![0.1, 0.2, 0.3],
             embedding_retrieve: Some(vec![0.4, 0.5, 0.6, 0.7]),
+            embedding_gtr: None,
             token_count: 2,
             source: Some("test".to_string()),
             metadata: serde_json::json!({"key": "value"}),
@@ -686,7 +760,7 @@ mod tests {
 
         store.add_chunks("s1", vec![chunk1, chunk2], None).unwrap();
 
-        let tags = vec![lume_hybrid::Tag {
+        let tags = vec![lume::Tag {
             start: 0,
             end: 7,
             surface: "DirectX".to_string(),
@@ -704,7 +778,7 @@ mod tests {
                 168.0,
                 "organize",
                 &tags,
-                &lume_hybrid::bm25::Bm25Params::default(),
+                &lume::bm25::Bm25Params::default(),
             )
             .unwrap();
 

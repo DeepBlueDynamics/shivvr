@@ -17,6 +17,8 @@ pub mod embedder;
 pub mod embeddinggemma;
 #[cfg(feature = "ml")]
 pub mod inverter;
+#[cfg(feature = "ml")]
+pub mod text_model;
 pub mod openai;
 pub mod similarity;
 pub mod store;
