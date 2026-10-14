@@ -40,11 +40,11 @@ pub struct AppState {
     pub start_time: std::time::Instant,
     pub nuts_auth: Option<Arc<NutsAuth>>,
     pub openai_auth_required: bool,
-    pub guardrail_tagger: Arc<std::sync::RwLock<lume_hybrid::Tagger>>,
+    pub guardrail_tagger: Arc<std::sync::RwLock<lume::Tagger>>,
     /// BM25 tuning params (k1/b/delta/title_weight/body_weight). Lume's
     /// successor to the old SearchConfig — variant + tagger get selected
     /// per call rather than living on the global config.
-    pub search_params: lume_hybrid::bm25::Bm25Params,
+    pub search_params: lume::bm25::Bm25Params,
     pub mcp_connections: Arc<tokio::sync::RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Result<axum::response::sse::Event, std::convert::Infallible>>>>>,
 }
 

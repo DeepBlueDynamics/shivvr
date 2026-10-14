@@ -117,21 +117,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("Loading guardrails from {}...", guardrails_dir);
-    let tagger = match lume_hybrid::Tagger::from_data_dir(&guardrails_dir) {
+    let tagger = match lume::Tagger::from_data_dir(&guardrails_dir) {
         Ok(t) => {
             println!("Guardrails loaded successfully. Active entries: {}", t.record_count());
             t
         }
         Err(e) => {
             println!("WARNING: Failed to load guardrails from {}: {} — fallback to empty tagger", guardrails_dir, e);
-            lume_hybrid::Tagger::build(Vec::<lume_hybrid::Entry>::new()).unwrap()
+            lume::Tagger::build(Vec::<lume::Entry>::new()).unwrap()
         }
     };
         let guardrail_tagger = Arc::new(std::sync::RwLock::new(tagger));
     // Was `SearchConfig::default()` in the old rust-hybrid-search crate. Lume
     // split that into Bm25Params (tuning) + SearchVariant (selector). We hold
     // the params; variant is selected per call in the search handlers.
-    let search_params = lume_hybrid::bm25::Bm25Params::default();
+    let search_params = lume::bm25::Bm25Params::default();
     let mcp_connections = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
 

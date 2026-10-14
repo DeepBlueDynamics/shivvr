@@ -66,7 +66,7 @@ impl std::error::Error for ModelMismatch {}
 
 struct Session {
     chunks: Vec<Chunk>,
-    bm25_index: Option<lume_hybrid::bm25::Bm25Index>,
+    bm25_index: Option<lume::bm25::Bm25Index>,
     created_at: DateTime<Utc>,
     last_ingested: DateTime<Utc>,
     total_tokens: usize,
@@ -143,8 +143,8 @@ impl Store {
         // don't use here — zero them out. Bm25Index::build takes Option<&Tagger>
         // for FST intent-boosting; we don't use that path in the BM25-only flow,
         // so pass None.
-        let sections: Vec<lume_hybrid::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
-            lume_hybrid::bm25::Section {
+        let sections: Vec<lume::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
+            lume::bm25::Section {
                 title: c.source.clone().unwrap_or_else(|| c.id.clone()),
                 body: c.text.clone(),
                 line_number: i,
@@ -152,7 +152,7 @@ impl Store {
                 entities: Vec::new(),
             }
         }).collect();
-        session.bm25_index = Some(lume_hybrid::bm25::Bm25Index::build(sections, None));
+        session.bm25_index = Some(lume::bm25::Bm25Index::build(sections, None));
 
         Ok(())
     }
@@ -308,8 +308,8 @@ impl Store {
         time_weight: Option<f32>,
         decay_halflife_hours: f32,
         role: &str,
-        tags: &[lume_hybrid::Tag],
-        _params: &lume_hybrid::bm25::Bm25Params,
+        tags: &[lume::Tag],
+        _params: &lume::bm25::Bm25Params,
     ) -> Result<Vec<(Chunk, f32)>> {
         let chunks = self.get_chunks(session_id)?;
         if chunks.is_empty() {
@@ -349,7 +349,7 @@ impl Store {
                 // internals of rust-hybrid-search.
                 let hits = idx.search(
                     query,
-                    lume_hybrid::bm25::SearchVariant::Classic,
+                    lume::bm25::SearchVariant::Classic,
                     _params,
                     None,
                 );
@@ -753,7 +753,7 @@ mod tests {
 
         store.add_chunks("s1", vec![chunk1, chunk2], None).unwrap();
 
-        let tags = vec![lume_hybrid::Tag {
+        let tags = vec![lume::Tag {
             start: 0,
             end: 7,
             surface: "DirectX".to_string(),
@@ -771,7 +771,7 @@ mod tests {
                 168.0,
                 "organize",
                 &tags,
-                &lume_hybrid::bm25::Bm25Params::default(),
+                &lume::bm25::Bm25Params::default(),
             )
             .unwrap();
 

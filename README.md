@@ -20,7 +20,7 @@
 
 Agents and edge applications constantly need to chunk documents, embed text or media, search recent context, and hand results back over HTTP or MCP — without standing up a permanent vector database or leaving sensitive session transcripts behind on disk.
 
-**shivvr** is an in-memory semantic embedding and retrieval service written in Rust on top of ONNX Runtime. It chunks incoming text on sentence boundaries, embeds it with **EmbeddingGemma 2** (the 768d default, with Matryoshka truncation down to 128d) or **GTR-T5-base**, embeds images and cross-modal text with **SigLIP**, fuses dense cosine similarity with **BM25** lexical search (`lume-hybrid`), and serves everything from ephemeral in-process memory.
+**shivvr** is an in-memory semantic embedding and retrieval service written in Rust on top of ONNX Runtime. It chunks incoming text on sentence boundaries, embeds it with **EmbeddingGemma 2** (the 768d default, with Matryoshka truncation down to 128d) or **GTR-T5-base**, embeds images and cross-modal text with **SigLIP**, fuses dense cosine similarity with **BM25** lexical search ([Lume](https://github.com/DeepBlueDynamics/lume)), and serves everything from ephemeral in-process memory.
 
 *What did this session just read, hear, or see — and how do we search it without leaving a trace on disk?*
 
@@ -37,7 +37,7 @@ logs and documents, on board and without a connection.
 
 - **EmbeddingGemma 2 default (768d, Matryoshka 512/256/128):** serves `POST /embed`, session ingest (`document` prefix), and search (`query` prefix) out of the box, with 19 task prefixes.
 - **GTR-T5-base & SigLIP spaces:** select `model: "gtr-t5-base"` for sessions or vectors that need `vec2text` inversion, or `siglip-base-patch16-224` (`/embed` and `/image/embed`) for shared text-to-image embeddings.
-- **Hybrid BM25 + vector search:** combines SIMD cosine similarity with `lume-hybrid` BM25 rank fusion, temporal recency decay, nearby-chunk context windows, and microsecond FST query guardrails.
+- **Hybrid BM25 + vector search:** combines SIMD cosine similarity with [Lume](https://github.com/DeepBlueDynamics/lume)'s stemmed BM25 (MaxScore-pruned) in rank fusion, temporal recency decay, nearby-chunk context windows, and microsecond FST query guardrails.
 - **Ephemeral by design:** all sessions and 2-hour TTL named scratchpads (`/temp/:name`) live in process memory (`RwLock<HashMap>`) — restarting the container leaves a clean slate.
 - **Vec2text inversion (`/invert`):** reconstructs approximate text from 768d GTR-T5-base embeddings using an ONNX projection + T5 encoder/decoder loop.
 - **Per-agent orthogonal encryption:** multiplies vectors by an agent's registered orthogonal matrix (`v @ Q`), preserving exact cosine similarity while keeping embeddings opaque.
@@ -129,7 +129,7 @@ graph LR
   subgraph Core["shivvr (axum + tokio)"]
     API["Router & Auth Gate"]
     Store["Ephemeral Store & TempStore"]
-    Hybrid["lume-hybrid (BM25 + FST)"]
+    Hybrid["Lume (BM25 + FST)"]
   end
   subgraph Models["ONNX Runtime (CUDA / CPU)"]
     Gemma["EmbeddingGemma 2 (default 768d)"]
@@ -161,7 +161,6 @@ python tests/functional.py http://localhost:8080
 |---|---|
 | `src/` | The `shivvr` library and service binary: API router, embedders, chunker, store, crypto, inverter, MCP, GhostAgent |
 | `src/bin/gateway.rs` | Lightweight `shivvr-gateway` front-door binary (landing page, `nuts-auth` verification, Cloud Run proxy) |
-| `vendor/lume-hybrid/` | Vendored `lume-hybrid` crate: BM25 lexical ranking, Reciprocal Rank Fusion, and FST guardrail tagger |
 | `scripts/` | Model exporters (`export_embeddinggemma2.py`, `export_gtr_models.py`, `export_siglip.py`), `quantize_models.py`, `bump-version.sh` |
 | `deploy/halos/` | HaLOS Marine container app definition for Raspberry Pi 5 (`docker-compose.yml`, `config.yml`, `metadata.json`) |
 | `tests/` | Rust integration tests (`tests/integration.rs`) and Python end-to-end functional suite (`tests/functional.py`) |

@@ -15,10 +15,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 
-# Vendor sub-crate (lume-hybrid) comes in with the rest of the source tree —
-# Cargo's `path = "vendor/lume-hybrid"` resolves inside /app/vendor/.
+# Dependency layer first (lume comes from its git tag, pinned in Cargo.lock).
 COPY Cargo.toml Cargo.lock ./
-COPY vendor ./vendor
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release --locked --features cuda || true
 RUN rm -rf src

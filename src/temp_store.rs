@@ -18,7 +18,7 @@ pub struct TempStoreMeta {
 
 struct TempSession {
     chunks: Vec<Chunk>,
-    bm25_index: Option<lume_hybrid::bm25::Bm25Index>,
+    bm25_index: Option<lume::bm25::Bm25Index>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     /// Text model fixed on the first ingest; empty until then.
@@ -88,8 +88,8 @@ impl TempStore {
 
         // Rebuild the local BM25 index with the combined session chunks. See
         // store.rs for the same pattern + Section/Tagger explanation.
-        let sections: Vec<lume_hybrid::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
-            lume_hybrid::bm25::Section {
+        let sections: Vec<lume::bm25::Section> = session.chunks.iter().enumerate().map(|(i, c)| {
+            lume::bm25::Section {
                 title: c.source.clone().unwrap_or_else(|| c.id.clone()),
                 body: c.text.clone(),
                 line_number: i,
@@ -97,7 +97,7 @@ impl TempStore {
                 entities: Vec::new(),
             }
         }).collect();
-        session.bm25_index = Some(lume_hybrid::bm25::Bm25Index::build(sections, None));
+        session.bm25_index = Some(lume::bm25::Bm25Index::build(sections, None));
 
         Ok(())
     }
@@ -193,8 +193,8 @@ impl TempStore {
         time_weight: Option<f32>,
         decay_halflife_hours: f32,
         role: &str,
-        tags: &[lume_hybrid::Tag],
-        _params: &lume_hybrid::bm25::Bm25Params,
+        tags: &[lume::Tag],
+        _params: &lume::bm25::Bm25Params,
     ) -> Result<Vec<(Chunk, f32)>> {
         let chunks = self.get_chunks(name)?;
         if chunks.is_empty() {
@@ -232,7 +232,7 @@ impl TempStore {
                 // old manual postings iteration.
                 let hits = idx.search(
                     query,
-                    lume_hybrid::bm25::SearchVariant::Classic,
+                    lume::bm25::SearchVariant::Classic,
                     _params,
                     None,
                 );

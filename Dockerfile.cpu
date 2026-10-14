@@ -21,9 +21,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 
-# Dependency layer first (lume-hybrid is vendored under vendor/).
+# Dependency layer first (lume comes from its git tag, pinned in Cargo.lock).
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY vendor ./vendor
 RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/bin/gateway.rs \
     && cargo build --release --locked --bin shivvr || true
 RUN rm -rf src

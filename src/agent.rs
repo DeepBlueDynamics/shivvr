@@ -114,7 +114,7 @@ impl GhostAgent {
             168.0,
             "organize",
             &[],
-            &lume_hybrid::bm25::Bm25Params::default(),
+            &lume::bm25::Bm25Params::default(),
         ) {
             Ok(results) => {
                 if results.is_empty() {
@@ -269,7 +269,7 @@ impl GhostAgent {
                     168.0,
                     "organize",
                     &[],
-                    &lume_hybrid::bm25::Bm25Params::default(),
+                    &lume::bm25::Bm25Params::default(),
                 ) {
                     Ok(results) => {
                         let mapped: Vec<serde_json::Value> = results.into_iter().map(|(chunk, score)| {

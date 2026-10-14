@@ -25,7 +25,7 @@ Status as of 2026-10-06. Owner: Kord. Work packages (WP) are sized for one worke
 
 A tag push builds all four, pushes them to Docker Hub and GCR, and deploys the cloud pair. No hand copies.
 
-**Lume 0.16 instead of the vendored copy (0.6.0):** replace `vendor/lume-hybrid` (a 2026-06 snapshot)
+**Lume 0.16 instead of the vendored copy (0.6.0, done):** replaced `vendor/lume-hybrid` (a 2026-06 snapshot)
 with `lume = { git = "https://github.com/DeepBlueDynamics/lume", tag = "v0.16.0", default-features = false }`
 and rename `lume_hybrid::` → `lume::`. The APIs shivvr uses are unchanged (Tagger, Entry, bm25::Section,
 Bm25Index::build/search, SearchVariant, regex). `Bm25Params` gained `coord_floor` (we use `::default()`).
