@@ -79,11 +79,17 @@ docker run -d --name shivvr -p 127.0.0.1:8080:8080 -v "$PWD/shivvr-models:/model
 
 ### GPU (amd64, NVIDIA driver 545+ and the [NVIDIA Container Toolkit](docs/BUILDING.md#1-host-gpu-setup-for-cuda-builds--containers))
 
-All models are in the image (about a 4.4 GB pull), so there's nothing to mount:
+All models are in the image (about a 4.4 GB pull), so there's nothing to mount. Setting
+`LD_LIBRARY_PATH` makes ONNX Runtime use your host's NVIDIA driver; use this on Docker Desktop for
+Windows (WSL2) and with driver 560 or newer:
 
 ```bash
-docker run -d --name shivvr --gpus all -p 127.0.0.1:8080:8080 deepbluedynamics/shivvr
+docker run -d --name shivvr --gpus all -p 127.0.0.1:8080:8080 -e LD_LIBRARY_PATH=/usr/lib/onnxruntime deepbluedynamics/shivvr
 ```
+
+Leave it out on a Linux host with driver 545–559; the image then uses the CUDA 12.6 compatibility
+library it ships. `docker logs shivvr` shows `Creating BFCArena for Cuda` when the GPU is in use and
+`falling back to CPU` when it isn't.
 
 ### Try it
 

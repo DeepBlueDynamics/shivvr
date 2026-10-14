@@ -72,7 +72,7 @@ Image-specific differences:
 
 | Setting | CUDA Image (`Dockerfile`) | CPU Image (`Dockerfile.cpu`) | HaLOS Pi Compose (`deploy/halos/shivvr`) |
 |---------|---------------------------|------------------------------|------------------------------------------|
-| `LD_LIBRARY_PATH` | `/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime` | `/usr/lib/onnxruntime` | `/usr/lib/onnxruntime` |
+| `LD_LIBRARY_PATH` | `/usr/local/cuda-12.6/compat:/usr/lib/onnxruntime` (set `/usr/lib/onnxruntime` on Docker Desktop/WSL2 or driver 560+; the compat `libcuda` hides the WSL driver and CUDA falls back to CPU) | `/usr/lib/onnxruntime` | `/usr/lib/onnxruntime` |
 | `TRANSCRIPTION_URL` | `http://hyperia-transcription:8765` | `http://localhost:8765` (binary default) | `http://localhost:8765` |
 | `GUARDRAILS_DIR` | `guardrails` (binary default) | `/data/guardrails` | `/data/guardrails` (mounted volume) |
 | `EMBEDDINGGEMMA2_MAX_TOKENS` | `2048` (binary default) | `2048` (binary default) | `512` (set in compose) |
